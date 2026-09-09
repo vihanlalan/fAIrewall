@@ -15,6 +15,7 @@ Design commitments, in the order they matter:
 from __future__ import annotations
 
 import functools
+import threading
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -77,6 +78,8 @@ class Firewall:
         # how a customer rolls the firewall out without an outage on day one.
         self.shadow = shadow
         self._contexts: Dict[str, Context] = {}
+        self._session_locks: Dict[str, threading.RLock] = {}
+        self._lock = threading.Lock()
 
     # ---------------------------------------------------------------- sessions
 
@@ -95,13 +98,24 @@ class Firewall:
             ctx.principal = principal
         return ctx
 
+    def session_lock(self, session_id: str) -> threading.RLock:
+        """Get or create the per-session lock synchronizing inspect, execution, and commit."""
+        with self._lock:
+            if session_id not in self._session_locks:
+                self._session_locks[session_id] = threading.RLock()
+            return self._session_locks[session_id]
+
     def reset(self, session_id: Optional[str] = None) -> None:
         for rule in self.rules:
             rule.reset(session_id)
         if session_id is None:
             self._contexts.clear()
+            with self._lock:
+                self._session_locks.clear()
         else:
             self._contexts.pop(session_id, None)
+            with self._lock:
+                self._session_locks.pop(session_id, None)
 
     # ------------------------------------------------------- layer 1: inbound
 
@@ -235,23 +249,32 @@ class Firewall:
         """
         ctx = ctx or self.session(session_id, principal)
         arguments = dict(arguments or {})
-        decision = self.inspect(tool, arguments, ctx=ctx)
 
-        if decision.blocked:
-            self._log("tool_call_blocked", decision, ctx, {"arguments": redact(arguments)})
-            if raise_on_block:
-                raise FirewallBlock(decision)
-            return "SECURITY BLOCK: " + decision.reason
+        with self.session_lock(ctx.session_id):
+            decision = self.inspect(tool, arguments, ctx=ctx)
 
-        self.commit(tool, arguments, ctx)
-        try:
-            result = fn(**arguments)
-        except Exception as exc:
-            self._log("tool_call_errored", decision, ctx,
-                      {"error": type(exc).__name__ + ": " + str(exc)[:200]})
-            raise
-        self._log("tool_call_executed", decision, ctx, {})
-        return result
+            if decision.blocked:
+                self._log("tool_call_blocked", decision, ctx, {"arguments": redact(arguments)})
+                if raise_on_block:
+                    raise FirewallBlock(decision)
+                return "SECURITY BLOCK: " + decision.reason
+
+            try:
+                result = fn(**arguments)
+            except Exception as exc:
+                self._log("tool_call_errored", decision, ctx,
+                          {"error": type(exc).__name__ + ": " + str(exc)[:200]})
+                raise
+
+            self.commit(tool, arguments, ctx)
+
+            tool_policy = self.policy.tool(tool)
+            if tool_policy and tool_policy.produces_untrusted_output:
+                tool_name = getattr(tool, "name", str(tool))
+                ctx.taint(tool_name)
+
+            self._log("tool_call_executed", decision, ctx, {})
+            return result
 
     # ------------------------------------------------------------ integration
 

@@ -7,7 +7,11 @@ of 499 each -- every one of them individually within policy.
 
 from __future__ import annotations
 
+import math
+import re
+import threading
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 from ..policy import Policy, Rule
@@ -23,14 +27,39 @@ def coerce_amount(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = "".join(ch for ch in value if ch.isdigit() or ch in ".-")
-        try:
-            return float(cleaned)
-        except ValueError:
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
-    return None
+        return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+
+    s = value.strip()
+    if not s:
+        return None
+
+    # Handle optional currency prefix '$'
+    if s.startswith("$"):
+        s = s[1:].strip()
+
+    # Handle optional currency suffix 'USD' (case-insensitive)
+    if s.upper().endswith("USD"):
+        s = s[:-3].strip()
+
+    # Strict numeric check: no scientific notation ('e' or 'E'), no letters,
+    # valid comma thousands separators if commas are used, or plain digits,
+    # and optional single decimal point.
+    pattern = r"^-?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$"
+    if not re.match(pattern, s):
+        return None
+
+    clean_num = s.replace(",", "")
+    try:
+        d = Decimal(clean_num)
+        return float(d)
+    except (InvalidOperation, ValueError):
+        return None
 
 
 class FinancialRule(Rule):
@@ -38,22 +67,23 @@ class FinancialRule(Rule):
 
     def __init__(self) -> None:
         self._session_spend: Dict[str, float] = defaultdict(float)
+        self._lock = threading.Lock()
 
     def session_spend(self, session_id: str) -> float:
-        return self._session_spend[session_id]
+        with self._lock:
+            return self._session_spend[session_id]
 
-    def _amounts(self, call: ToolCall, policy: Policy) -> Dict[str, float]:
-        found: Dict[str, float] = {}
+    def _amounts(self, call: ToolCall, policy: Policy) -> Dict[str, Optional[float]]:
+        found: Dict[str, Optional[float]] = {}
         for name in policy.spend_arg_names:
             if name in call.arguments:
-                amount = coerce_amount(call.arguments[name])
-                if amount is not None:
-                    found[name] = amount
+                found[name] = coerce_amount(call.arguments[name])
         return found
 
     def _spend_total(self, call: ToolCall, policy: Policy) -> float:
         amounts = self._amounts(call, policy)
-        return max(amounts.values()) if amounts else 0.0
+        valid = [a for a in amounts.values() if a is not None]
+        return max(valid) if valid else 0.0
 
     def _limit_for(self, arg_name, call, ctx, policy):
         """Most specific ceiling wins: tool override, then principal, then policy."""
@@ -72,6 +102,24 @@ class FinancialRule(Rule):
             return findings
 
         for arg_name, amount in amounts.items():
+            if amount is None:
+                findings.append(
+                    Finding(
+                        rule_id="financial.unparseable_amount",
+                        action=Action.BLOCK,
+                        severity=Severity.HIGH,
+                        message=(
+                            "Unparseable spend amount in argument '%s': %r; failing closed."
+                            % (arg_name, call.arguments.get(arg_name))
+                        ),
+                        evidence={
+                            "argument": arg_name,
+                            "raw_value": str(call.arguments.get(arg_name)),
+                        },
+                    )
+                )
+                continue
+
             if amount < 0:
                 findings.append(
                     Finding(
@@ -109,7 +157,9 @@ class FinancialRule(Rule):
                 )
 
         total = self._spend_total(call, policy)
-        projected = self._session_spend[ctx.session_id] + total
+        with self._lock:
+            current_spend = self._session_spend[ctx.session_id]
+        projected = current_spend + total
         if total and projected > policy.max_spend_per_session:
             findings.append(
                 Finding(
@@ -121,7 +171,7 @@ class FinancialRule(Rule):
                         "budget." % (projected, policy.max_spend_per_session)
                     ),
                     evidence={
-                        "already_spent": round(self._session_spend[ctx.session_id], 2),
+                        "already_spent": round(current_spend, 2),
                         "this_call": total,
                         "budget": policy.max_spend_per_session,
                     },
@@ -130,10 +180,13 @@ class FinancialRule(Rule):
         return findings
 
     def commit(self, call: ToolCall, ctx: Context, policy: Policy) -> None:
-        self._session_spend[ctx.session_id] += self._spend_total(call, policy)
+        with self._lock:
+            self._session_spend[ctx.session_id] += self._spend_total(call, policy)
 
     def reset(self, session_id: Optional[str] = None) -> None:
-        if session_id is None:
-            self._session_spend.clear()
-        else:
-            self._session_spend.pop(session_id, None)
+        with self._lock:
+            if session_id is None:
+                self._session_spend.clear()
+            else:
+                self._session_spend.pop(session_id, None)
+

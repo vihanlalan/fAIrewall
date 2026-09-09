@@ -39,6 +39,8 @@ class ToolPolicy:
     forbid_when_tainted: bool = False
     # If true, block and surface for a human rather than deciding automatically.
     require_human_approval: bool = False
+    # If true, executing this tool marks the session tainted with untrusted content.
+    produces_untrusted_output: bool = False
 
 
 @dataclass
@@ -86,6 +88,7 @@ class Policy:
                     "rate_limit_per_minute": t.rate_limit_per_minute,
                     "forbid_when_tainted": t.forbid_when_tainted,
                     "require_human_approval": t.require_human_approval,
+                    "produces_untrusted_output": t.produces_untrusted_output,
                 }
                 for name, t in sorted(self.tools.items())
             },
@@ -105,6 +108,7 @@ class Policy:
                 rate_limit_per_minute=cfg.get("rate_limit_per_minute"),
                 forbid_when_tainted=bool(cfg.get("forbid_when_tainted", False)),
                 require_human_approval=bool(cfg.get("require_human_approval", False)),
+                produces_untrusted_output=bool(cfg.get("produces_untrusted_output", False)),
             )
             for name, cfg in raw_tools.items()
         }
