@@ -37,10 +37,37 @@ _SECRETS: List[Tuple[str, re.Pattern, Severity]] = [
     ("bearer_header", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}"), Severity.HIGH),
 ]
 
+# Candidate card pattern: 13-19 digits optionally separated by spaces or hyphens.
+# A separate Luhn check prunes tracking numbers / order IDs / phone numbers that
+# share the same digit-count but fail the checksum.
+_CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
+
+
+def _luhn_valid(number: str) -> bool:
+    """Return True if *number* (digits only) satisfies the Luhn checksum.
+
+    The Luhn algorithm is the standard checksum used on all major payment card
+    networks (Visa, Mastercard, Amex, Discover, etc.).  Strings that merely
+    happen to be 13-19 digits long but are not payment cards (order IDs,
+    tracking numbers, phone numbers) fail this check and produce no finding.
+    """
+    digits = [int(c) for c in number if c.isdigit()]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
 # Bulk-PII shapes. One is a support ticket; forty in one payload is a breach.
 _PII = [
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), 3),
-    ("credit_card", re.compile(r"\b(?:\d[ -]?){13,16}\b"), 3),
+    # credit_card uses the dedicated candidate regex + _luhn_valid() -- see _check_bulk_pii
     ("email", _EMAIL, 25),
 ]
 
@@ -150,4 +177,31 @@ class EgressRule(Rule):
                                   "distinct_count": hits, "threshold": threshold},
                     )
                 )
+
+        # Credit card detection: candidate digit strings validated against the Luhn
+        # checksum to eliminate false positives from order IDs, tracking numbers, and
+        # phone numbers of similar length.
+        card_threshold = 3
+        luhn_hits: set = set()
+        for match in _CARD_CANDIDATE.finditer(text):
+            candidate = match.group(0)
+            digits_only = candidate.replace(" ", "").replace("-", "")
+            if _luhn_valid(digits_only):
+                luhn_hits.add(digits_only)
+        if len(luhn_hits) >= card_threshold:
+            findings.append(
+                Finding(
+                    rule_id="egress.bulk_pii",
+                    action=Action.BLOCK,
+                    severity=Severity.HIGH,
+                    message=(
+                        "Argument %s contains %d distinct credit_card values (Luhn-validated), "
+                        "consistent with bulk data extraction rather than a single-record operation."
+                        % (path or "<root>", len(luhn_hits))
+                    ),
+                    evidence={"argument": path, "pii_type": "credit_card",
+                              "distinct_count": len(luhn_hits), "threshold": card_threshold},
+                )
+            )
         return findings
+
