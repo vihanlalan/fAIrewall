@@ -47,12 +47,24 @@ def create_app(
     audit_path: Optional[str] = None,
     shadow: bool = False,
     upstream_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> FastAPI:
-    """Create a FastAPI application with firewall enforcement."""
+    """Create a FastAPI application with firewall enforcement.
+
+    Args:
+        api_key: When set, all management endpoints (``/v1/inspect/*``,
+            ``/v1/commit/tool``, ``/v1/audit/verify``) require the caller to
+            supply this key via ``Authorization: Bearer <key>`` or
+            ``X-API-Key: <key>``.  Falls back to the ``FAIREWALL_API_KEY``
+            environment variable.  When neither is set the endpoints are
+            unauthenticated (suitable for local development only).
+    """
     if firewall is None:
         p = policy or Policy()
         audit = AuditLog(path=audit_path) if audit_path else AuditLog()
         firewall = Firewall(policy=p, audit=audit, shadow=shadow)
+
+    effective_api_key = api_key or os.environ.get("FAIREWALL_API_KEY")
 
     app = FastAPI(
         title="fAIrewall Gateway",
@@ -61,6 +73,25 @@ def create_app(
     )
 
     upstream = upstream_url or os.environ.get("FAIREWALL_UPSTREAM_URL", "https://api.openai.com")
+
+    # ---------------------------------------------------------------------- auth
+
+    def _require_auth(authorization: Optional[str], x_api_key: Optional[str]) -> None:
+        """Raise HTTP 401 if the request does not carry a valid API key."""
+        if not effective_api_key:
+            return  # no key configured → open access (local dev)
+        bearer = None
+        if authorization:
+            parts = authorization.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                bearer = parts[1]
+        supplied = bearer or x_api_key
+        if supplied != effective_api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing API key. Supply via 'Authorization: Bearer <key>' "
+                       "or 'X-API-Key: <key>'.",
+            )
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -74,7 +105,12 @@ def create_app(
         }
 
     @app.post("/v1/inspect/input")
-    async def inspect_input_endpoint(payload: InspectInputPayload) -> Dict[str, Any]:
+    async def inspect_input_endpoint(
+        payload: InspectInputPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        _require_auth(authorization, x_api_key)
         try:
             trust = Trust(payload.trust.lower())
         except ValueError:
@@ -98,7 +134,12 @@ def create_app(
         }
 
     @app.post("/v1/inspect/tool")
-    async def inspect_tool_endpoint(payload: InspectToolPayload) -> Dict[str, Any]:
+    async def inspect_tool_endpoint(
+        payload: InspectToolPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        _require_auth(authorization, x_api_key)
         principal = Principal(id=payload.principal_id, roles=payload.principal_roles)
         ctx = firewall.session(session_id=payload.session_id, principal=principal)
         decision = firewall.inspect(
@@ -113,13 +154,22 @@ def create_app(
         }
 
     @app.post("/v1/commit/tool")
-    async def commit_tool_endpoint(payload: CommitToolPayload) -> Dict[str, Any]:
+    async def commit_tool_endpoint(
+        payload: CommitToolPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        _require_auth(authorization, x_api_key)
         ctx = firewall.session(session_id=payload.session_id)
         firewall.commit(tool=payload.tool, arguments=payload.arguments, ctx=ctx)
         return {"status": "committed", "tool": payload.tool, "session_id": ctx.session_id}
 
     @app.get("/v1/audit/verify")
-    async def verify_audit_endpoint() -> Dict[str, Any]:
+    async def verify_audit_endpoint(
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        _require_auth(authorization, x_api_key)
         verification = firewall.audit.verify()
         return {
             "valid": verification.valid,
@@ -205,7 +255,10 @@ def create_app(
 
         resp_data = upstream_resp.json()
 
-        # 3. Outbound inspection of tool calls emitted by the model
+        # 3. Outbound inspection of tool calls emitted by the model.
+        #    Commit each allowed call so session spend and velocity windows
+        #    advance correctly.  (Without commit(), budget/rate limits are
+        #    silently never enforced through the proxy route.)
         choices = resp_data.get("choices", [])
         for choice in choices:
             message = choice.get("message", {})
@@ -241,6 +294,14 @@ def create_app(
                             }
                         },
                     )
+
+                # Commit the allowed tool call so budgets and rate limits advance.
+                firewall.commit(tool=tool_name, arguments=tool_args, ctx=ctx)
+                # Taint the session if the tool's policy marks it as producing
+                # untrusted output (e.g. a web-search or external fetch tool).
+                tool_policy = firewall.policy.tool(tool_name)
+                if tool_policy and getattr(tool_policy, "produces_untrusted_output", False):
+                    ctx.taint(tool_name)
 
         return JSONResponse(content=resp_data, status_code=200)
 

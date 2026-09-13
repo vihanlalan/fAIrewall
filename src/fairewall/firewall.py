@@ -70,6 +70,8 @@ class Firewall:
         rules: Optional[Sequence[Rule]] = None,
         audit: Optional[AuditLog] = None,
         shadow: bool = False,
+        session_ttl: Optional[float] = 3600.0,
+        max_sessions: Optional[int] = 10_000,
     ) -> None:
         self.policy = policy or Policy()
         self.rules: List[Rule] = list(rules) if rules is not None else list(default_rules())
@@ -77,25 +79,46 @@ class Firewall:
         # Shadow mode evaluates and logs everything but blocks nothing. This is
         # how a customer rolls the firewall out without an outage on day one.
         self.shadow = shadow
+        # Session lifecycle controls.  In a long-running proxy that handles many
+        # short-lived agent sessions the per-session dicts grow without bound
+        # unless we actively evict stale entries.
+        #   session_ttl    – idle seconds after which a session is evicted
+        #                    (None → no TTL, caller must call reset() manually)
+        #   max_sessions   – hard cap; evicts the LRU session when exceeded
+        #                    (None → no cap)
+        self.session_ttl = session_ttl
+        self.max_sessions = max_sessions
         self._contexts: Dict[str, Context] = {}
         self._session_locks: Dict[str, threading.RLock] = {}
+        self._session_last_active: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     # ---------------------------------------------------------------- sessions
+
+    def _touch(self, session_id: str) -> None:
+        """Record activity for TTL and LRU tracking (must be called under self._lock)."""
+        self._session_last_active[session_id] = time.monotonic()
 
     def session(
         self,
         session_id: Optional[str] = None,
         principal: Optional[Principal] = None,
     ) -> Context:
-        """Get or create the context that scopes budgets, rate limits, and taint."""
+        """Get or create the context that scopes budgets, rate limits, and taint.
+
+        Opportunistically prunes stale sessions so the caller doesn't have to
+        manage the lifecycle manually in most integrations.
+        """
         session_id = session_id or uuid.uuid4().hex[:12]
-        ctx = self._contexts.get(session_id)
-        if ctx is None:
-            ctx = Context(session_id=session_id, principal=principal or Principal())
-            self._contexts[session_id] = ctx
-        elif principal is not None:
-            ctx.principal = principal
+        with self._lock:
+            ctx = self._contexts.get(session_id)
+            if ctx is None:
+                ctx = Context(session_id=session_id, principal=principal or Principal())
+                self._contexts[session_id] = ctx
+            elif principal is not None:
+                ctx.principal = principal
+            self._touch(session_id)
+        self._opportunistic_prune()
         return ctx
 
     def session_lock(self, session_id: str) -> threading.RLock:
@@ -103,19 +126,74 @@ class Firewall:
         with self._lock:
             if session_id not in self._session_locks:
                 self._session_locks[session_id] = threading.RLock()
+            self._touch(session_id)
             return self._session_locks[session_id]
+
+    def prune_stale_sessions(self, ttl: Optional[float] = None) -> int:
+        """Evict sessions that have been idle longer than *ttl* seconds.
+
+        Also enforces *max_sessions* by evicting least-recently-used sessions
+        when the cap is exceeded.  Returns the number of sessions evicted.
+
+        Args:
+            ttl: Override the instance-level ``session_ttl`` for this call.
+                 Pass ``None`` to use the instance default.
+        """
+        effective_ttl = ttl if ttl is not None else self.session_ttl
+        evicted = []
+        with self._lock:
+            now = time.monotonic()
+            if effective_ttl is not None:
+                for sid, last in list(self._session_last_active.items()):
+                    if now - last > effective_ttl:
+                        evicted.append(sid)
+
+            # LRU cap: if still over budget after TTL evictions, drop oldest.
+            if self.max_sessions is not None:
+                remaining = [s for s in self._contexts if s not in evicted]
+                overflow = len(remaining) - self.max_sessions
+                if overflow > 0:
+                    sorted_by_age = sorted(
+                        remaining,
+                        key=lambda s: self._session_last_active.get(s, 0.0),
+                    )
+                    evicted.extend(sorted_by_age[:overflow])
+
+        for sid in evicted:
+            self.reset(sid)
+        return len(evicted)
+
+    def _opportunistic_prune(self) -> None:
+        """Run a lightweight prune pass without blocking the caller.
+
+        Only evicts TTL-expired sessions; skips the LRU cap enforcement to keep
+        the common path fast.  Runs at most once per 256 session accesses to
+        avoid adding noticeable overhead.
+        """
+        with self._lock:
+            total = len(self._contexts)
+        # Simple heuristic: prune when count exceeds cap or every 256 touches.
+        should_prune = (
+            (self.max_sessions is not None and total > self.max_sessions)
+            or (self.session_ttl is not None and total > 0 and total % 256 == 0)
+        )
+        if should_prune:
+            self.prune_stale_sessions()
 
     def reset(self, session_id: Optional[str] = None) -> None:
         for rule in self.rules:
             rule.reset(session_id)
         if session_id is None:
-            self._contexts.clear()
             with self._lock:
+                self._contexts.clear()
                 self._session_locks.clear()
+                self._session_last_active.clear()
         else:
-            self._contexts.pop(session_id, None)
             with self._lock:
+                self._contexts.pop(session_id, None)
                 self._session_locks.pop(session_id, None)
+                self._session_last_active.pop(session_id, None)
+
 
     # ------------------------------------------------------- layer 1: inbound
 

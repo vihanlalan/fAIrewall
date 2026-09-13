@@ -16,11 +16,20 @@ def guard_openai_tool_calls(
     session_id: Optional[str] = None,
     principal: Optional[Principal] = None,
     raise_on_block: bool = False,
+    commit: bool = True,
 ) -> List[Tuple[Any, Decision]]:
     """Inspect a list of OpenAI tool_calls from a chat completion message.
 
     Returns a list of (tool_call, decision) tuples.
     If raise_on_block is True, raises FirewallBlock on the first blocked tool call.
+
+    Args:
+        commit: When True (default), advance session spend and rate-limit windows
+            for every allowed call by calling ``firewall.commit()``.  This makes
+            ``max_spend_per_session`` and per-session velocity limits take effect.
+            Pass ``commit=False`` for dry-run / shadow inspection without mutating
+            any state.  Note that ``execute_openai_tool_calls()`` already commits
+            via ``firewall.execute()`` and does not need ``commit=True`` here.
     """
     ctx = ctx or firewall.session(session_id, principal)
     results: List[Tuple[Any, Decision]] = []
@@ -47,9 +56,13 @@ def guard_openai_tool_calls(
         if decision.blocked and raise_on_block:
             raise FirewallBlock(decision)
 
+        if commit and not decision.blocked:
+            firewall.commit(tool_name, arguments, ctx)
+
         results.append((tc, decision))
 
     return results
+
 
 
 def execute_openai_tool_calls(

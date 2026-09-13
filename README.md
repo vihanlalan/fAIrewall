@@ -2,9 +2,10 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-70%20passed-success.svg)](#)
-[![Zero Dependencies](https://img.shields.io/badge/core%20deps-zero-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-84%20passed-success.svg)](#)
+[![Zero Core Dependencies](https://img.shields.io/badge/core%20deps-zero-brightgreen.svg)](#)
 [![Latency](https://img.shields.io/badge/overhead-%3C1ms-brightgreen.svg)](#)
+[![CI](https://github.com/fairewall/fairewall/actions/workflows/ci.yml/badge.svg)](#)
 
 > **A deterministic security firewall for autonomous AI agents.**  
 > *Inbound semantic guard + outbound tool-call circuit breaker + tamper-evident cryptographic audit log.*
@@ -201,16 +202,79 @@ handler = FairewallCallbackHandler(firewall=firewall, raise_on_block=True)
 agent_executor.invoke({"input": user_prompt}, config={"callbacks": [handler]})
 ```
 
+> **Note on taint propagation:** `on_tool_end()` only marks the session as tainted if the tool's `ToolPolicy` has `produces_untrusted_output=True`. Without this flag, outputs are screened for injection signatures but the session is not unconditionally tainted. This matches the opt-in model used throughout the library — tools that fetch external content (web, PDF, email) should declare `produces_untrusted_output=True`, while pure computation tools should not.
+
 ---
 
 ## 🧪 Testing
 
-Run the full 70-test verification suite:
+Run the full test suite (84 tests):
 ```bash
 pytest -v tests
 ```
 
 ---
 
+## 📦 Dependencies
+
+The **core library** (`pip install fairewall`) has **zero runtime dependencies** — just the Python standard library.
+
+Optional extras pull in additional packages:
+| Extra | Packages added |
+|:------|:---------------|
+| `fairewall[proxy]` | `fastapi`, `uvicorn`, `pydantic` |
+| `fairewall[yaml]` | `PyYAML` |
+| `fairewall[dev]` | `pytest`, `fastapi`, `httpx`, `PyYAML` |
+
+---
+
+## 🔐 Proxy Endpoint Authentication
+
+Management endpoints (`/v1/inspect/*`, `/v1/commit/tool`, `/v1/audit/verify`) support API key authentication:
+
+```bash
+# Set key at startup (recommended for any non-localhost deployment)
+fairewall serve --api-key mysecretkey
+# or via environment variable
+export FAIREWALL_API_KEY=mysecretkey
+fairewall serve
+```
+
+Clients supply the key via `Authorization: Bearer <key>` or the `X-API-Key` header. When no key is configured, endpoints are unauthenticated (suitable for local development only).
+
+---
+
+## 🔗 Proxying Non-OpenAI Upstreams
+
+Point `fairewall serve` at any OpenAI-compatible endpoint:
+
+```bash
+fairewall serve --upstream-url https://api.anthropic.com
+# or
+export FAIREWALL_UPSTREAM_URL=https://my-llm-proxy.internal
+fairewall serve
+```
+
+---
+
+## ⚠️ Commit vs Inspect in SDK Integrations
+
+| Function | Commits state? | Use when |
+|:---------|:--------------|:---------|
+| `guard_openai_tool_calls()` | ✅ Yes (`commit=True` default) | Inspect + commit in one step |
+| `guard_openai_tool_calls(commit=False)` | ❌ No | Dry-run shadow mode |
+| `execute_openai_tool_calls()` | ✅ Yes (via `firewall.execute()`) | Inspect + run + commit in one step |
+
+`FairewallCallbackHandler` also commits after every allowed call by default (`commit=True`). Pass `commit=False` to disable.
+
+---
+
+## 🛡️ Defense-in-Depth: Injection Scanner Limitations
+
+> [!NOTE]
+> The regex-based injection scanner (`rules/injection.py`) is a **fast first-pass screen** (<0.01 ms). A motivated adversary using paraphrasing or obfuscation can slip past it. The real protection against indirect prompt injection attacks is the **structural `forbid_when_tainted` taint rule**: once an agent reads any third-party content, high-privilege tools marked `forbid_when_tainted=True` are mathematically blocked regardless of what that content says. Always pair sensitive tools with `forbid_when_tainted=True` and use `produces_untrusted_output=True` on any tool that fetches external data (web search, PDF, database rows, emails).
+
+---
+
 ## 📄 License
-Licensed under the Apache License, Version 2.0.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.

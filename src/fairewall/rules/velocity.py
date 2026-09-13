@@ -31,11 +31,27 @@ class VelocityRule(Rule):
         self._windows: Dict[Tuple[str, Optional[str]], Deque[float]] = defaultdict(deque)
 
     def _window(self, key: Tuple[str, Optional[str]], now: float) -> Deque[float]:
-        window = self._windows[key]
+        window = self._windows.get(key)
+        if window is None:
+            return deque()
         cutoff = now - WINDOW_SECONDS
         while window and window[0] <= cutoff:
             window.popleft()
+        if not window:
+            # Remove the entry so the dict doesn't accumulate dormant keys.
+            self._windows.pop(key, None)
+            return deque()
         return window
+
+    def prune_stale_windows(self) -> None:
+        """Evict all windows that have no timestamps within the current window.
+
+        Normally ``_window()`` already evicts empty windows opportunistically.
+        Call this explicitly if you want a definitive GC pass.
+        """
+        now = self._clock()
+        for key in list(self._windows):
+            self._window(key, now)
 
     def evaluate(self, call: ToolCall, ctx: Context, policy: Policy) -> List[Finding]:
         now = self._clock()
@@ -84,8 +100,26 @@ class VelocityRule(Rule):
 
     def commit(self, call: ToolCall, ctx: Context, policy: Policy) -> None:
         now = self._clock()
-        self._window((ctx.session_id, None), now).append(now)
-        self._window((ctx.session_id, call.tool), now).append(now)
+
+        session_key = (ctx.session_id, None)
+        session_window = self._windows.get(session_key)
+        if session_window is None:
+            session_window = deque()
+            self._windows[session_key] = session_window
+        cutoff = now - WINDOW_SECONDS
+        while session_window and session_window[0] <= cutoff:
+            session_window.popleft()
+        session_window.append(now)
+
+        tool_key = (ctx.session_id, call.tool)
+        tool_window = self._windows.get(tool_key)
+        if tool_window is None:
+            tool_window = deque()
+            self._windows[tool_key] = tool_window
+        cutoff = now - WINDOW_SECONDS
+        while tool_window and tool_window[0] <= cutoff:
+            tool_window.popleft()
+        tool_window.append(now)
 
     def reset(self, session_id: Optional[str] = None) -> None:
         if session_id is None:

@@ -194,6 +194,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         policy_path=args.policy,
         audit_path=args.audit,
         shadow=args.shadow,
+        upstream_url=args.upstream_url,
+        api_key=args.api_key,
     )
     return 0
 
@@ -245,6 +247,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_serve.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=8000, help="Port (default: 8000)")
     p_serve.add_argument("--shadow", action="store_true", help="Run in shadow mode (log but do not block)")
+    p_serve.add_argument(
+        "--upstream-url", "--upstream",
+        dest="upstream_url",
+        default=None,
+        help="Upstream LLM base URL to proxy to (default: https://api.openai.com). "
+             "Can also be set via FAIREWALL_UPSTREAM_URL environment variable.",
+    )
+    p_serve.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        help="API key required to access management endpoints (/v1/inspect/*, "
+             "/v1/commit/tool, /v1/audit/verify). Can also be set via FAIREWALL_API_KEY "
+             "environment variable. When unset, endpoints are unauthenticated (local dev only).",
+    )
     p_serve.set_defaults(func=cmd_serve)
 
     parsed = parser.parse_args(argv)

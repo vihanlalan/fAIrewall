@@ -20,6 +20,14 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture
+def authed_client():
+    """Proxy with API key authentication enabled."""
+    policy = Policy(max_spend_per_transaction=500.0)
+    app = create_app(policy=policy, api_key="test-secret-key")
+    return TestClient(app)
+
+
 def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -83,3 +91,58 @@ def test_commit_and_audit_verify(client):
     resp_audit = client.get("/v1/audit/verify")
     assert resp_audit.status_code == 200
     assert resp_audit.json()["valid"] is True
+
+
+# ------------------------------------------------------------------ Auth tests
+
+def test_proxy_auth_no_key_returns_401(authed_client):
+    """All management endpoints return 401 when api_key is set and no key provided."""
+    endpoints_post = [
+        ("/v1/inspect/input", {"text": "hello", "trust": "user"}),
+        ("/v1/inspect/tool", {"tool": "search", "arguments": {}}),
+        ("/v1/commit/tool", {"tool": "search", "arguments": {}}),
+    ]
+    for path, payload in endpoints_post:
+        resp = authed_client.post(path, json=payload)
+        assert resp.status_code == 401, f"Expected 401 for unauthenticated {path}, got {resp.status_code}"
+
+    resp_audit = authed_client.get("/v1/audit/verify")
+    assert resp_audit.status_code == 401
+
+
+def test_proxy_auth_wrong_key_returns_401(authed_client):
+    """Wrong API key returns 401."""
+    resp = authed_client.post(
+        "/v1/inspect/input",
+        json={"text": "hello", "trust": "user"},
+        headers={"Authorization": "Bearer wrong-key"},
+    )
+    assert resp.status_code == 401
+
+
+def test_proxy_auth_bearer_key_accepted(authed_client):
+    """Valid Bearer key grants access."""
+    resp = authed_client.post(
+        "/v1/inspect/input",
+        json={"text": "hello", "trust": "user"},
+        headers={"Authorization": "Bearer test-secret-key"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["allowed"] is True
+
+
+def test_proxy_auth_x_api_key_header_accepted(authed_client):
+    """Valid X-API-Key header grants access."""
+    resp = authed_client.post(
+        "/v1/inspect/tool",
+        json={"tool": "search", "arguments": {}},
+        headers={"X-API-Key": "test-secret-key"},
+    )
+    assert resp.status_code == 200
+
+
+def test_proxy_health_no_auth_required(authed_client):
+    """/health endpoint is always accessible without authentication."""
+    resp = authed_client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
