@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..audit import AuditLog
+from ..detectors import Detector
 from ..firewall import Firewall
 from ..policy import Policy
 
@@ -16,6 +17,7 @@ def create_app(
     shadow: bool = False,
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    detectors: Optional[Sequence[Detector]] = None,
 ):
     from .app import create_app as _create_app
     return _create_app(
@@ -25,6 +27,7 @@ def create_app(
         shadow=shadow,
         upstream_url=upstream_url,
         api_key=api_key,
+        detectors=detectors,
     )
 
 
@@ -36,6 +39,7 @@ def run_server(
     shadow: bool = False,
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    detectors: Optional[Sequence[Detector]] = None,
 ) -> None:
     """Run the proxy using uvicorn."""
     try:
@@ -45,11 +49,12 @@ def run_server(
 
     policy = Policy.from_file(policy_path) if policy_path else Policy()
     audit = AuditLog(path=audit_path) if audit_path else None
-    fw = Firewall(policy=policy, audit=audit, shadow=shadow)
+    fw = Firewall(policy=policy, audit=audit, shadow=shadow, detectors=detectors)
     app = create_app(firewall=fw, upstream_url=upstream_url, api_key=api_key)
 
     print(f"[fAIrewall] Starting proxy server on http://{host}:{port}")
     print(f"[fAIrewall] Policy: v{policy.version} [{policy.fingerprint()}] | Shadow: {shadow}")
+    print(f"[fAIrewall] Detector tier: {', '.join(d.name for d in fw.detectors) or 'off (rules only)'}")
     if api_key:
         print("[fAIrewall] Management endpoints are authenticated (API key configured).")
     else:

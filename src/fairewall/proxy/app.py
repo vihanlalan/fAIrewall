@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 try:
     from fastapi import FastAPI, HTTPException, Header, Request, Response, status
@@ -15,6 +15,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("fAIrewall proxy requires `pip install fairewall[proxy]`") from exc
 
 from ..audit import AuditLog
+from ..detectors import Detector
 from ..firewall import Firewall
 from ..policy import Policy
 from ..types import Action, Context, Principal, Trust
@@ -48,6 +49,7 @@ def create_app(
     shadow: bool = False,
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    detectors: Optional[Sequence[Detector]] = None,
 ) -> FastAPI:
     """Create a FastAPI application with firewall enforcement.
 
@@ -62,7 +64,7 @@ def create_app(
     if firewall is None:
         p = policy or Policy()
         audit = AuditLog(path=audit_path) if audit_path else AuditLog()
-        firewall = Firewall(policy=p, audit=audit, shadow=shadow)
+        firewall = Firewall(policy=p, audit=audit, shadow=shadow, detectors=detectors)
 
     effective_api_key = api_key or os.environ.get("FAIREWALL_API_KEY")
 
@@ -102,6 +104,7 @@ def create_app(
             "policy_version": firewall.policy.version,
             "policy_fingerprint": firewall.policy.fingerprint(),
             "audit_head": firewall.audit.head,
+            "detectors": [d.name for d in firewall.detectors],
         }
 
     @app.post("/v1/inspect/input")

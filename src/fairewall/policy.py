@@ -41,6 +41,19 @@ class ToolPolicy:
     require_human_approval: bool = False
     # If true, executing this tool marks the session tainted with untrusted content.
     produces_untrusted_output: bool = False
+    # "low" or "high". Decides whether the detector tier inspects every call to
+    # this tool. None = inferred from the other constraints (see Policy.risk_tier).
+    risk_tier: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.risk_tier is not None and self.risk_tier not in RISK_TIERS:
+            raise ValueError(
+                f"Tool {self.name!r}: risk_tier must be one of {RISK_TIERS} or None, "
+                f"got {self.risk_tier!r}"
+            )
+
+
+RISK_TIERS = ("low", "high")
 
 
 @dataclass
@@ -59,9 +72,44 @@ class Policy:
     # Detectors that FLAG rather than BLOCK, for shadow-mode rollout.
     flag_only_rules: List[str] = field(default_factory=list)
     tools: Dict[str, ToolPolicy] = field(default_factory=dict)
+    # Risk tier for tools with no ToolPolicy entry. "high" fails safe.
+    unknown_tool_risk: str = "high"
+    # Detector scores at or above these thresholds FLAG / BLOCK. Part of the
+    # fingerprinted policy so an auditor can see how sensitive the ML tier was.
+    detector_flag_threshold: float = 0.5
+    detector_block_threshold: float = 0.85
+
+    def __post_init__(self) -> None:
+        if self.unknown_tool_risk not in RISK_TIERS:
+            raise ValueError(
+                f"unknown_tool_risk must be one of {RISK_TIERS}, got {self.unknown_tool_risk!r}"
+            )
+        if not 0.0 <= self.detector_flag_threshold <= self.detector_block_threshold <= 1.0:
+            raise ValueError(
+                "Detector thresholds must satisfy 0 <= flag_threshold <= block_threshold <= 1, "
+                f"got flag={self.detector_flag_threshold}, block={self.detector_block_threshold}"
+            )
 
     def tool(self, name: str) -> Optional[ToolPolicy]:
         return self.tools.get(name)
+
+    def risk_tier(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
+        """Resolve a tool's risk tier from declared policy, never from prompt text.
+
+        Inference treats any tool that moves money, needs a role, needs a human,
+        or is fenced off from tainted sessions as high risk.
+        """
+        tp = self.tool(name)
+        if tp is None:
+            return self.unknown_tool_risk
+        if tp.risk_tier is not None:
+            return tp.risk_tier
+        if (tp.forbid_when_tainted or tp.require_human_approval
+                or tp.max_values or tp.allowed_roles):
+            return "high"
+        if arguments and any(a in arguments for a in self.spend_arg_names):
+            return "high"
+        return "low"
 
     def fingerprint(self) -> str:
         """Stable hash of the effective ruleset, recorded on every decision."""
@@ -78,6 +126,9 @@ class Policy:
             "spend_arg_names": self.spend_arg_names,
             "allowed_egress_domains": self.allowed_egress_domains,
             "flag_only_rules": self.flag_only_rules,
+            "unknown_tool_risk": self.unknown_tool_risk,
+            "detector_flag_threshold": self.detector_flag_threshold,
+            "detector_block_threshold": self.detector_block_threshold,
             "tools": {
                 name: {
                     "allowed_roles": t.allowed_roles,
@@ -89,6 +140,7 @@ class Policy:
                     "forbid_when_tainted": t.forbid_when_tainted,
                     "require_human_approval": t.require_human_approval,
                     "produces_untrusted_output": t.produces_untrusted_output,
+                    "risk_tier": t.risk_tier,
                 }
                 for name, t in sorted(self.tools.items())
             },
@@ -109,13 +161,15 @@ class Policy:
                 forbid_when_tainted=bool(cfg.get("forbid_when_tainted", False)),
                 require_human_approval=bool(cfg.get("require_human_approval", False)),
                 produces_untrusted_output=bool(cfg.get("produces_untrusted_output", False)),
+                risk_tier=cfg.get("risk_tier"),
             )
             for name, cfg in raw_tools.items()
         }
         known = {
             "version", "default_deny", "max_spend_per_transaction",
             "max_spend_per_session", "max_calls_per_minute", "spend_arg_names",
-            "allowed_egress_domains", "flag_only_rules",
+            "allowed_egress_domains", "flag_only_rules", "unknown_tool_risk",
+            "detector_flag_threshold", "detector_block_threshold",
         }
         unknown = set(data) - known - {"tools"}
         if unknown:
@@ -130,6 +184,9 @@ class Policy:
             allowed_egress_domains=data.get("allowed_egress_domains") or [],
             flag_only_rules=data.get("flag_only_rules") or [],
             tools=tools,
+            unknown_tool_risk=str(data.get("unknown_tool_risk", "high")),
+            detector_flag_threshold=float(data.get("detector_flag_threshold", 0.5)),
+            detector_block_threshold=float(data.get("detector_block_threshold", 0.85)),
         )
 
     @classmethod

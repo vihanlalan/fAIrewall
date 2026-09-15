@@ -21,6 +21,8 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .audit import AuditLog
+from .detectors import Detector
+from .escalation import arguments_text, route_inbound, route_outbound, run_detectors
 from .policy import Policy, Rule
 from .rules import default_rules
 from .rules.injection import scan_text
@@ -72,9 +74,12 @@ class Firewall:
         shadow: bool = False,
         session_ttl: Optional[float] = 3600.0,
         max_sessions: Optional[int] = 10_000,
+        detectors: Optional[Sequence[Detector]] = None,
     ) -> None:
         self.policy = policy or Policy()
         self.rules: List[Rule] = list(rules) if rules is not None else list(default_rules())
+        # Tier 1. Only consulted when the router escalates; empty = rules only.
+        self.detectors: List[Detector] = list(detectors or [])
         self.audit = audit if audit is not None else AuditLog()
         # Shadow mode evaluates and logs everything but blocks nothing. This is
         # how a customer rolls the firewall out without an outage on day one.
@@ -215,6 +220,11 @@ class Firewall:
         started = time.perf_counter()
         ctx = ctx or self.session()
         findings = scan_text(text, trust=trust, location=source)
+        route = route_inbound(trust, self._routing_view(findings))
+        tiers = ["t0"]
+        if route.escalate and self.detectors and text:
+            tiers.append("t1")
+            findings.extend(run_detectors(self.detectors, text, route, self.policy, source))
         findings = [self._apply_shadow(f) for f in findings]
 
         if trust is Trust.UNTRUSTED:
@@ -226,6 +236,8 @@ class Firewall:
             session_id=ctx.session_id,
             tool="<input:" + source + ">",
             latency_ms=(time.perf_counter() - started) * 1000,
+            tiers=tiers,
+            route=route.reason,
         )
         self._log("input_inspected", decision, ctx, {
             "trust": trust.value,
@@ -291,6 +303,15 @@ class Firewall:
                     )
                 )
 
+        risk_tier = self.policy.risk_tier(tool, call.arguments)
+        route = route_outbound(risk_tier, ctx, self._routing_view(findings))
+        tiers = ["t0"]
+        text = arguments_text(call.arguments)
+        if route.escalate and self.detectors and text:
+            tiers.append("t1")
+            findings.extend(run_detectors(self.detectors, text, route, self.policy,
+                                          "arguments:" + tool))
+
         findings = [self._apply_shadow(f) for f in findings]
         decision = Decision.from_findings(
             findings,
@@ -298,9 +319,11 @@ class Firewall:
             session_id=ctx.session_id,
             tool=tool,
             latency_ms=(time.perf_counter() - started) * 1000,
+            tiers=tiers,
+            route=route.reason,
         )
         self._log("tool_call_inspected", decision, ctx,
-                  {"arguments": redact(call.arguments)})
+                  {"arguments": redact(call.arguments), "risk_tier": risk_tier})
         return decision
 
     def commit(self, tool: str, arguments: Dict[str, Any], ctx: Context) -> None:
@@ -398,9 +421,14 @@ class Firewall:
 
     # --------------------------------------------------------------- internals
 
-    def _apply_shadow(self, finding: Finding) -> Finding:
+    def _routing_view(self, findings: List[Finding]) -> List[Finding]:
+        # Route on what *would* happen ignoring shadow mode, but honour
+        # flag_only_rules: an operator who distrusts a rule's block wants T1's opinion.
+        return [self._apply_shadow(f, include_shadow=False) for f in findings]
+
+    def _apply_shadow(self, finding: Finding, include_shadow: bool = True) -> Finding:
         """Downgrade a block to a flag in shadow mode or for flag-only rules."""
-        downgrade = self.shadow or any(
+        downgrade = (include_shadow and self.shadow) or any(
             finding.rule_id == r or finding.rule_id.startswith(r + ".")
             for r in self.policy.flag_only_rules
         )

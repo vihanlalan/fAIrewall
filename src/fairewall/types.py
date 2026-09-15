@@ -119,6 +119,9 @@ class Decision:
     tool: str = ""
     timestamp: float = field(default_factory=time.time)
     latency_ms: float = 0.0
+    # Which inspection tiers ran ("t0" = rules, "t1" = detectors) and why.
+    tiers: List[str] = field(default_factory=lambda: ["t0"])
+    route: str = ""
 
     @property
     def allowed(self) -> bool:
@@ -152,6 +155,8 @@ class Decision:
             "severity": self.severity.value,
             "timestamp": self.timestamp,
             "latency_ms": round(self.latency_ms, 3),
+            "tiers": list(self.tiers),
+            "route": self.route,
             "findings": [
                 {
                     "rule_id": f.rule_id,

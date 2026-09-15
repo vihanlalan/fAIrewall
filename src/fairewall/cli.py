@@ -9,10 +9,21 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from .audit import verify_file
+from .detectors import Detector, build_detectors
 from .firewall import Firewall
 from .policy import Policy
-from .rules.injection import scan_text
-from .types import Action, Context, Decision, Principal, Severity, Trust
+from .types import Action, Decision, Principal, Trust
+
+
+def _detectors(args: argparse.Namespace) -> List[Detector]:
+    return build_detectors(args.detector or [], args.onnx_model, args.onnx_tokenizer)
+
+
+def _add_detector_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--detector", action="append", choices=["heuristic", "onnx"],
+                   help="Enable a tier-1 detector (repeatable). Runs only on escalated calls.")
+    p.add_argument("--onnx-model", help="Path to ONNX classifier (with --detector onnx)")
+    p.add_argument("--onnx-tokenizer", help="Path to tokenizer.json (with --detector onnx)")
 
 
 def _print_decision_summary(decision: Decision) -> None:
@@ -27,6 +38,7 @@ def _print_decision_summary(decision: Decision) -> None:
     print(f"Severity: {decision.severity.value.upper()}")
     print(f"Reason:   {decision.reason}")
     print(f"Latency:  {decision.latency_ms:.3f} ms")
+    print(f"Tiers:    {', '.join(decision.tiers)} (route: {decision.route})")
 
     if decision.findings:
         print("\nFindings:")
@@ -40,8 +52,8 @@ def _print_decision_summary(decision: Decision) -> None:
 def cmd_inspect(args: argparse.Namespace) -> int:
     """Screen text against prompt-injection signatures."""
     trust = Trust(args.trust.lower())
-    findings = scan_text(args.text, trust=trust, location=args.source)
-    decision = Decision.from_findings(findings, tool=f"<input:{args.source}>")
+    fw = Firewall(detectors=_detectors(args))
+    decision = fw.inspect_input(args.text, trust=trust, source=args.source)
 
     if args.json:
         print(json.dumps(decision.to_dict(), indent=2))
@@ -57,7 +69,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 def cmd_check_call(args: argparse.Namespace) -> int:
     """Adjudicate a candidate tool call against a policy."""
     policy = Policy.from_file(args.policy) if args.policy else Policy()
-    fw = Firewall(policy=policy)
+    fw = Firewall(policy=policy, detectors=_detectors(args))
 
     try:
         call_args = json.loads(args.args) if args.args else {}
@@ -81,6 +93,7 @@ def cmd_check_call(args: argparse.Namespace) -> int:
         print(f"Session:   {ctx.session_id}")
         print(f"Principal: {ctx.principal.id} (roles: {ctx.principal.roles})")
         print(f"Tainted:   {ctx.tainted}")
+        print(f"Risk tier: {policy.risk_tier(args.tool, call_args)}")
         print(f"Policy:    v{policy.version} [{policy.fingerprint()}]")
         _print_decision_summary(decision)
 
@@ -124,8 +137,13 @@ def cmd_init_policy(args: argparse.Namespace) -> int:
         "spend_arg_names": ["amount", "total", "value"],
         "allowed_egress_domains": ["api.stripe.com", "api.github.com"],
         "flag_only_rules": [],
+        "unknown_tool_risk": "high",
+        "detector_flag_threshold": 0.5,
+        "detector_block_threshold": 0.85,
         "tools": {
             "web_search": {
+                "risk_tier": "low",
+                "produces_untrusted_output": True,
                 "allowed_roles": [],
                 "required_args": ["query"],
                 "allowed_args": ["query", "limit"],
@@ -136,6 +154,7 @@ def cmd_init_policy(args: argparse.Namespace) -> int:
                 "require_human_approval": False,
             },
             "process_refund": {
+                "risk_tier": "high",
                 "allowed_roles": ["billing_admin", "finance"],
                 "required_args": ["amount", "order_id"],
                 "allowed_args": ["amount", "order_id", "reason"],
@@ -146,6 +165,7 @@ def cmd_init_policy(args: argparse.Namespace) -> int:
                 "require_human_approval": False,
             },
             "send_email": {
+                "risk_tier": "high",
                 "allowed_roles": ["agent"],
                 "required_args": ["recipient", "body"],
                 "allowed_args": ["recipient", "subject", "body"],
@@ -196,6 +216,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         shadow=args.shadow,
         upstream_url=args.upstream_url,
         api_key=args.api_key,
+        detectors=_detectors(args),
     )
     return 0
 
@@ -214,6 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                            help="Provenance trust level (default: user)")
     p_inspect.add_argument("--source", default="cli", help="Source identifier")
     p_inspect.add_argument("--json", action="store_true", help="Output raw JSON")
+    _add_detector_args(p_inspect)
     p_inspect.set_defaults(func=cmd_inspect)
 
     # check-call
@@ -226,6 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_call.add_argument("--roles", default="", help="Comma-separated principal roles")
     p_call.add_argument("--tainted", action="store_true", help="Mark session as already tainted")
     p_call.add_argument("--json", action="store_true", help="Output raw JSON")
+    _add_detector_args(p_call)
     p_call.set_defaults(func=cmd_check_call)
 
     # verify-audit
@@ -262,6 +285,7 @@ def main(argv: Optional[List[str]] = None) -> int:
              "/v1/commit/tool, /v1/audit/verify). Can also be set via FAIREWALL_API_KEY "
              "environment variable. When unset, endpoints are unauthenticated (local dev only).",
     )
+    _add_detector_args(p_serve)
     p_serve.set_defaults(func=cmd_serve)
 
     parsed = parser.parse_args(argv)

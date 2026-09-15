@@ -113,6 +113,48 @@ print(process_refund(amount=1500.0, order_id="ord_102"))
 
 ---
 
+## 🧭 Risk-Routed Detector Tier (Hybrid Deterministic + ML)
+
+Rules (tier 0) run on every call. Scored detectors (tier 1) run **only when the router escalates**, and the router uses signals an attacker cannot rephrase away. Prompt keywords are never used to route:
+
+| Route | When | Tier 1 runs? |
+| :--- | :--- | :--- |
+| `t0_decisive` | A rule already blocked | No, the verdict is final |
+| `high_risk_tool` | Tool's `risk_tier` is `high` (explicit, or inferred from `forbid_when_tainted`, `max_values`, `allowed_roles`, `require_human_approval`, or a spend argument). Unknown tools default to high | Yes. A crashing detector **fails closed** |
+| `tainted_session` | Session has ingested untrusted content | Yes |
+| `t0_ambiguous` | A rule only FLAGged (soft signature or `flag_only_rules`) | Yes |
+| `untrusted_content` | Inbound text with `trust=UNTRUSTED` | Yes |
+| `low_risk_clean` / `user_clean` | None of the above | No, rules-only speed |
+
+**Detectors can only tighten.** Their findings are appended and the strictest verdict wins, so a detector can move a call from ALLOW to FLAG to BLOCK but can never un-block one.
+
+```python
+from fairewall import Firewall, Policy, ToolPolicy, HeuristicDetector, OnnxDetector
+
+policy = Policy(
+    detector_flag_threshold=0.5,     # audited in the policy fingerprint
+    detector_block_threshold=0.85,
+    tools={
+        "web_search": ToolPolicy("web_search", risk_tier="low", produces_untrusted_output=True),
+        "send_email": ToolPolicy("send_email", risk_tier="high"),
+    },
+)
+fw = Firewall(policy, detectors=[
+    HeuristicDetector(),                                   # zero-dependency baseline
+    # OnnxDetector("model.onnx", "tokenizer.json"),        # pip install fairewall[ml]
+])
+
+d = fw.inspect("send_email", {"body": "..."})
+d.tiers   # ["t0", "t1"]
+d.route   # "high_risk_tool"
+```
+
+- `HeuristicDetector` combines weak signals (addressing the model, concealment, urgency, a sensitive action or target) into one score. It catches paraphrased injections that no single regex signature matches. It is a baseline, not a trained model.
+- `OnnxDetector` wraps any HuggingFace-style sequence classifier exported to ONNX. It scans long documents in overlapping windows and scores by the worst window.
+- CLI: `fairewall check-call send_email '{"body": "..."}' --detector heuristic` (also available on `inspect` and `serve`).
+
+---
+
 ## 📜 Cryptographic Tamper-Evident Audit Trail
 
 Every decision made by `fAIrewall` is hashed into an append-only SHA-256 Merkle chain before returning to the caller.
@@ -208,7 +250,7 @@ agent_executor.invoke({"input": user_prompt}, config={"callbacks": [handler]})
 
 ## 🧪 Testing
 
-Run the full test suite (84 tests):
+Run the full test suite:
 ```bash
 pytest -v tests
 ```

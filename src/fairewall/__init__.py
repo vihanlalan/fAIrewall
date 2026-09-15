@@ -22,6 +22,7 @@ Two enforcement points, one audit trail:
 """
 
 from .audit import AuditLog, ChainVerification, verify_chain, verify_file
+from .detectors import Detector, DetectorResult, HeuristicDetector, OnnxDetector
 from .firewall import Firewall, redact
 from .policy import Policy, Rule, ToolPolicy
 from .rules import default_rules
@@ -44,6 +45,10 @@ __all__ = [
     "Policy",
     "ToolPolicy",
     "Rule",
+    "Detector",
+    "DetectorResult",
+    "HeuristicDetector",
+    "OnnxDetector",
     "AuditLog",
     "ChainVerification",
     "verify_chain",
