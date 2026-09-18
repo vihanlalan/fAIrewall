@@ -64,3 +64,4 @@ venv.bak/
 # Audit / Logs / Local artifacts
 *.log
 *.jsonl
+data/

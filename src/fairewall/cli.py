@@ -200,6 +200,49 @@ def cmd_init_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve_sdk(args: argparse.Namespace) -> int:
+    """Launch the full SDK gateway with all configured platform adapters.
+
+    Reads configuration from environment variables (or a .env file if
+    python-dotenv is installed).  Only the adapters whose secrets are
+    present in the environment are mounted; others are skipped with a
+    warning.  See .env.example for the full variable reference.
+    """
+    try:
+        import uvicorn  # type: ignore
+    except ImportError:
+        print("uvicorn is required: pip install uvicorn", file=sys.stderr)
+        return 2
+
+    # Allow CLI flags to override env vars
+    if args.host:
+        os.environ.setdefault("FAIREWALL_HOST", args.host)
+    if args.port:
+        os.environ.setdefault("FAIREWALL_PORT", str(args.port))
+    if args.shadow:
+        os.environ["FAIREWALL_SHADOW"] = "true"
+    if args.preset:
+        os.environ.setdefault("FAIREWALL_PRESET", args.preset)
+
+    host = os.environ.get("FAIREWALL_HOST", args.host)
+    port = int(os.environ.get("FAIREWALL_PORT", str(args.port)))
+
+    print(f"Starting fAIrewall SDK Gateway on {host}:{port}")
+    print("Platform adapters are auto-mounted from environment variables.")
+    print("See .env.example for configuration reference.")
+    print()
+
+    uvicorn.run(
+        "fairewall.server:app",
+        host=host,
+        port=port,
+        reload=args.reload,
+        log_level="info",
+        proxy_headers=True,
+    )
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Launch the HTTP proxy gateway."""
     try:
@@ -287,6 +330,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     _add_detector_args(p_serve)
     p_serve.set_defaults(func=cmd_serve)
+
+    # serve-sdk  (SDK gateway with all platform adapters auto-mounted)
+    p_serve_sdk = subparsers.add_parser(
+        "serve-sdk",
+        help="Launch the SDK gateway with all configured platform adapters (reads .env)",
+    )
+    p_serve_sdk.add_argument(
+        "--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)"
+    )
+    p_serve_sdk.add_argument(
+        "--port", type=int, default=8000, help="Bind port (default: 8000)"
+    )
+    p_serve_sdk.add_argument(
+        "--preset",
+        default=None,
+        help="Global policy preset (ZAPIER_SME | COPILOT_ENTERPRISE | "
+             "SALESFORCE_CRM | WHATSAPP_BOT | UIPATH_RPA). "
+             "Can also be set via FAIREWALL_PRESET env var.",
+    )
+    p_serve_sdk.add_argument(
+        "--shadow", action="store_true",
+        help="Log-only mode: decisions are recorded but never block.",
+    )
+    p_serve_sdk.add_argument(
+        "--reload", action="store_true",
+        help="Enable uvicorn auto-reload (development only).",
+    )
+    p_serve_sdk.set_defaults(func=cmd_serve_sdk)
 
     parsed = parser.parse_args(argv)
     if not hasattr(parsed, "func"):

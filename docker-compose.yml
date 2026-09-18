@@ -1,0 +1,29 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fairewall-gateway:latest
+    container_name: fairewall-gateway
+    restart: unless-stopped
+    ports:
+      - "${FAIREWALL_PORT:-8000}:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist the tamper-evident audit log across container restarts
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  fairewall_data:
