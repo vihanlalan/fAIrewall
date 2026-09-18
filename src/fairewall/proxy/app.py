@@ -69,9 +69,9 @@ def create_app(
     effective_api_key = api_key or os.environ.get("FAIREWALL_API_KEY")
 
     app = FastAPI(
-        title="fAIrewall Gateway",
-        description="Deterministic security firewall & reverse proxy for autonomous AI agents.",
-        version="0.1.0",
+        title="fAIrewall SDK Gateway",
+        description="Enterprise AI governance SDK: deterministic security firewall & reverse proxy for autonomous AI agents.",
+        version="0.2.0",
     )
 
     upstream = upstream_url or os.environ.get("FAIREWALL_UPSTREAM_URL", "https://api.openai.com")
@@ -99,13 +99,36 @@ def create_app(
     async def health() -> Dict[str, Any]:
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "shadow": firewall.shadow,
             "policy_version": firewall.policy.version,
             "policy_fingerprint": firewall.policy.fingerprint(),
             "audit_head": firewall.audit.head,
             "detectors": [d.name for d in firewall.detectors],
         }
+
+    @app.get("/v1/sdk/health")
+    async def sdk_health() -> Dict[str, Any]:
+        """SDK health — lists loaded platform adapters."""
+        from .. import __version__ as SDK_VERSION
+        from ..presets import list_presets
+        mounted = [r.prefix for r in app.routes
+                   if hasattr(r, 'prefix') and r.prefix.startswith('/v1/')]
+        return {
+            "status": "ok",
+            "sdk_version": SDK_VERSION,
+            "shadow": firewall.shadow,
+            "policy_version": firewall.policy.version,
+            "policy_fingerprint": firewall.policy.fingerprint(),
+            "adapters_mounted": [p for p in mounted if p not in ('/v1/inspect', '/v1/commit', '/v1/audit', '/v1/chat', '/v1/sdk')],
+            "audit_head": firewall.audit.head,
+        }
+
+    @app.get("/v1/sdk/presets")
+    async def sdk_presets() -> Dict[str, Any]:
+        """List all available policy presets."""
+        from ..presets import list_presets
+        return {"presets": list_presets()}
 
     @app.post("/v1/inspect/input")
     async def inspect_input_endpoint(

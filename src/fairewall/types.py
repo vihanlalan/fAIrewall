@@ -107,6 +107,16 @@ class Finding:
     message: str
     evidence: Dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-safe dict."""
+        return {
+            "rule_id": self.rule_id,
+            "action": self.action.value,
+            "severity": self.severity.value,
+            "message": self.message,
+            "evidence": self.evidence,
+        }
+
 
 @dataclass
 class Decision:
@@ -130,6 +140,11 @@ class Decision:
     @property
     def blocked(self) -> bool:
         return self.action is Action.BLOCK
+
+    @property
+    def flagged(self) -> bool:
+        """True when the decision is FLAG (allowed but marked for review)."""
+        return self.action is Action.FLAG
 
     @property
     def reason(self) -> str:
