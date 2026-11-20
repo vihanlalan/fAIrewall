@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .detectors import Detector
 from .policy import Policy
@@ -70,8 +70,13 @@ def run_detectors(
     route: Route,
     policy: Policy,
     location: str,
+    scores: Optional[List[Tuple[str, float]]] = None,
 ) -> List[Finding]:
-    """Score text with each detector, stopping at the first block."""
+    """Score text with each detector, stopping at the first block.
+
+    ``scores``, when given, collects every (detector, score) pair, including
+    scores below the flag line: the learning memory treats those as weak signals.
+    """
     findings: List[Finding] = []
     text = text[:MAX_DETECTOR_CHARS]
     for det in detectors:
@@ -92,6 +97,8 @@ def run_detectors(
             continue
 
         score = min(1.0, max(0.0, float(result.score)))
+        if scores is not None:
+            scores.append((det.name, score))
         if score >= policy.detector_block_threshold:
             action, severity, threshold = Action.BLOCK, Severity.HIGH, policy.detector_block_threshold
         elif score >= policy.detector_flag_threshold:

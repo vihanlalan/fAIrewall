@@ -4,6 +4,7 @@ from .egress import EgressRule
 from .financial import FinancialRule
 from .injection import SIGNATURES, scan_text
 from .payload import PayloadRule, TaintRule
+from .scope import ScopeRule
 from .schema import SchemaRule
 from .velocity import VelocityRule
 
@@ -12,6 +13,7 @@ __all__ = [
     "FinancialRule",
     "PayloadRule",
     "SchemaRule",
+    "ScopeRule",
     "TaintRule",
     "VelocityRule",
     "SIGNATURES",
@@ -21,4 +23,5 @@ __all__ = [
 
 def default_rules():
     """The stock ruleset, ordered cheapest-and-most-decisive first."""
-    return [SchemaRule(), TaintRule(), FinancialRule(), VelocityRule(), PayloadRule(), EgressRule()]
+    return [SchemaRule(), TaintRule(), FinancialRule(), VelocityRule(), PayloadRule(), EgressRule(),
+            ScopeRule()]

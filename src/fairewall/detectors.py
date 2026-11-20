@@ -12,6 +12,9 @@ Two implementations ship:
     a sensitive action) rather than requiring an exact phrase.
   * OnnxDetector -- adapter for any HuggingFace-style sequence classifier
     exported to ONNX (e.g. a prompt-injection model). Needs `fairewall[ml]`.
+
+LearnedDetector (local, no dependencies) and ModelArmorDetector (Google Cloud
+Model Armor, in fairewall.integrations.model_armor) are the ones to use.
 """
 
 from __future__ import annotations
@@ -34,6 +37,10 @@ class DetectorResult:
 
 class Detector(ABC):
     name: str = "detector"
+    # A "deep" detector is costly (a remote call). With source sampling on,
+    # deep detectors run on a sample of a trusted source's content; local
+    # detectors always run.
+    deep: bool = False
 
     @abstractmethod
     def detect(self, text: str) -> DetectorResult:
@@ -239,9 +246,17 @@ class LearnedDetector(Detector):
         )
 
 
+DETECTOR_NAMES = ("heuristic", "learned", "onnx", "model_armor")
+
+
 def build_detectors(names: Sequence[str], onnx_model: Optional[str] = None,
-                    onnx_tokenizer: Optional[str] = None) -> List[Detector]:
-    """Construct detectors from CLI/config names ("heuristic", "learned", "onnx")."""
+                    onnx_tokenizer: Optional[str] = None,
+                    model_armor_template: Optional[str] = None) -> List[Detector]:
+    """Construct detectors from CLI/config names (see DETECTOR_NAMES).
+
+    Order matters: detectors run in the order given and stop at the first
+    block, so list cheap local ones before a remote one like model_armor.
+    """
     out: List[Detector] = []
     for name in names:
         if name == "heuristic":
@@ -250,6 +265,9 @@ def build_detectors(names: Sequence[str], onnx_model: Optional[str] = None,
             out.append(LearnedDetector())
         elif name == "onnx":
             out.append(OnnxDetector(model_path=onnx_model, tokenizer_path=onnx_tokenizer))
+        elif name in ("model_armor", "model-armor"):
+            from .integrations.model_armor import ModelArmorDetector
+            out.append(ModelArmorDetector(model_armor_template))
         else:
-            raise ValueError(f"Unknown detector {name!r}; expected 'heuristic', 'learned' or 'onnx'")
+            raise ValueError(f"Unknown detector {name!r}; expected one of {', '.join(DETECTOR_NAMES)}")
     return out

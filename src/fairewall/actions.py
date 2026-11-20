@@ -1,13 +1,14 @@
-"""Durable dispatch for registered business actions. SQLite is the release authority."""
+"""Durable dispatch for registered business actions. The database is the release authority.
+
+SQLite (a file path) or Postgres (a postgresql:// URL, e.g. Cloud SQL); see fairewall.db.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 from typing import Any, Callable
@@ -16,6 +17,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 
 from .approvals import ApprovalError, needs_human
+from .db import Database
 from .firewall import Firewall
 from .rules import FinancialRule, VelocityRule
 from .types import Context, Principal, Trust
@@ -23,6 +25,61 @@ from .types import Context, Principal, Trust
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+# On Postgres a trailing BIGSERIAL "seq" column orders rows by insertion
+# (SQLite uses its rowid).
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS actions (
+    id TEXT PRIMARY KEY, principal TEXT, session TEXT, token TEXT,
+    tool TEXT, args TEXT, fingerprint TEXT, status TEXT, rules TEXT,
+    expires REAL, reviewer TEXT, result TEXT, policy_hash TEXT, definition TEXT, generation INTEGER,
+    UNIQUE(principal, token));
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pins (server TEXT, tool TEXT, fingerprint TEXT, PRIMARY KEY(server, tool));
+CREATE TABLE IF NOT EXISTS reconciliations (
+    action_id TEXT PRIMARY KEY, operator TEXT NOT NULL, reference TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS action_events
+    (action_id TEXT, status TEXT, reviewer TEXT, policy_hash TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS definition_reviews
+    (tool TEXT, server TEXT, fingerprint TEXT, reviewer TEXT, at TEXT);
+CREATE TABLE IF NOT EXISTS registry
+    (tool TEXT PRIMARY KEY, fingerprint TEXT, generation INTEGER NOT NULL)
+"""
+
+# Every status change is recorded by the database itself, so no code path can
+# change a status without leaving an event.
+_SQLITE_TRIGGERS = ";;".join(
+    f"""CREATE TRIGGER IF NOT EXISTS action_event_{name}
+        AFTER {operation} ON actions {clause} BEGIN
+        INSERT INTO action_events VALUES (NEW.id, NEW.status, NEW.reviewer,
+            NEW.policy_hash, strftime('%Y-%m-%dT%H:%M:%fZ','now')); END"""
+    for name, operation, clause in (("insert", "INSERT", ""),
+                                    ("update", "UPDATE OF status", "WHEN NEW.status != OLD.status")))
+
+_PG_TRIGGER = """
+ALTER TABLE actions ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+ALTER TABLE action_events ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+CREATE OR REPLACE FUNCTION action_event() RETURNS trigger AS $fw$
+BEGIN
+    IF TG_OP = 'INSERT' OR NEW.status IS DISTINCT FROM OLD.status THEN
+        INSERT INTO action_events (action_id, status, reviewer, policy_hash, at)
+        VALUES (NEW.id, NEW.status, NEW.reviewer, NEW.policy_hash,
+                to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
+    END IF;
+    RETURN NULL;
+END $fw$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER action_event AFTER INSERT OR UPDATE OF status ON actions
+    FOR EACH ROW EXECUTE FUNCTION action_event();
+"""
+
+_UPSERT_PIN = ("INSERT INTO pins VALUES (?,?,?) ON CONFLICT(server, tool) "
+               "DO UPDATE SET fingerprint=excluded.fingerprint")
+
+
+def _utc_now():
+    now = time.time()
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + ".%03dZ" % (int(now * 1000) % 1000)
 
 
 @dataclass(frozen=True)
@@ -71,81 +128,26 @@ class ActionStore:
         # Per-thread timing of the last handler call, so callers can separate
         # fAIrewall's own overhead from the time the business system took.
         self._timing = threading.local()
-        self._local = threading.local()
-        self._connections = []
-        self._connections_lock = threading.Lock()
+        self.db = Database(path, schema="fairewall_actions")
+        self.db.create(_SCHEMA, postgres_extra=_PG_TRIGGER, sqlite_extra=_SQLITE_TRIGGERS)
         with self.transaction() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS actions (
-                id TEXT PRIMARY KEY, principal TEXT, session TEXT, token TEXT,
-                tool TEXT, args TEXT, fingerprint TEXT, status TEXT, rules TEXT,
-                expires REAL, reviewer TEXT, result TEXT, policy_hash TEXT, definition TEXT, generation INTEGER,
-                UNIQUE(principal, token))""")
-            db.execute("""CREATE TABLE IF NOT EXISTS sessions
-                       (id TEXT PRIMARY KEY, state TEXT NOT NULL)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS pins
-                       (server TEXT, tool TEXT, fingerprint TEXT, PRIMARY KEY(server, tool))""")
-
-            db.execute("""CREATE TABLE IF NOT EXISTS reconciliations (
-                action_id TEXT PRIMARY KEY, operator TEXT NOT NULL, reference TEXT NOT NULL)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS action_events
-                (action_id TEXT, status TEXT, reviewer TEXT, policy_hash TEXT, at TEXT)""")
-            for operation, clause in (("INSERT", ""), ("UPDATE OF status", "WHEN NEW.status != OLD.status")):
-                name = operation.split()[0].lower()
-                db.execute(f"""CREATE TRIGGER IF NOT EXISTS action_event_{name}
-                    AFTER {operation} ON actions {clause} BEGIN
-                    INSERT INTO action_events VALUES (NEW.id, NEW.status, NEW.reviewer,
-                        NEW.policy_hash, strftime('%Y-%m-%dT%H:%M:%fZ','now')); END""")
-
-            db.execute("""CREATE TABLE IF NOT EXISTS definition_reviews
-                (tool TEXT, server TEXT, fingerprint TEXT, reviewer TEXT, at TEXT)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS registry
-                (tool TEXT PRIMARY KEY, fingerprint TEXT, generation INTEGER NOT NULL)""")
             previous = {r["tool"]: r["fingerprint"] for r in db.execute("SELECT * FROM registry")}
             for tool in set(previous) | set(self.actions):
                 binding = self.actions.get(tool)
                 digest = binding.fingerprint() if binding else None
                 if digest != previous.get(tool):
                     db.execute("""INSERT INTO registry VALUES (?,?,1) ON CONFLICT(tool)
-                        DO UPDATE SET fingerprint=excluded.fingerprint, generation=generation+1""",
+                        DO UPDATE SET fingerprint=excluded.fingerprint, generation=registry.generation+1""",
                                (tool, digest))
                     db.execute("DELETE FROM pins WHERE tool=?", (tool,))
 
-    @contextmanager
     def transaction(self):
-        """One write-locked transaction on this thread's connection.
-
-        Connections are reused per thread: opening one costs more than the
-        policy decision itself. WAL journaling lets readers proceed while a
-        writer commits; every commit is still fully synchronous.
-        """
-        db = getattr(self._local, "db", None)
-        if db is None:
-            db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=FULL")
-            self._local.db = db
-            with self._connections_lock:
-                self._connections.append(db)
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            yield db
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
-        else:
-            db.execute("COMMIT")
+        """One write-locked transaction (see fairewall.db: serialized per store)."""
+        return self.db.transaction()
 
     def close(self):
         """Close every connection this store opened (needed before deleting its files)."""
-        with self._connections_lock:
-            for db in self._connections:
-                try:
-                    db.close()
-                except Exception:
-                    pass
-            self._connections.clear()
-        self._local = threading.local()
+        self.db.close()
 
     def _runtime(self, db, session, principal):
         scope = canonical([principal.id, session])
@@ -165,7 +167,7 @@ class ActionStore:
         for rule in fw.rules:
             if isinstance(rule, (FinancialRule, VelocityRule)):
                 state[rule.id] = rule.snapshot_session(ctx.session_id)
-        db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)",
+        db.execute("INSERT INTO sessions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
                    (ctx.session_id, canonical(state)))
 
     def screen(self, session, principal, text, source="intake"):
@@ -178,6 +180,7 @@ class ActionStore:
     @staticmethod
     def _view(row):
         data = dict(row)
+        data.pop("seq", None)
         data["definition"] = json.loads(data["definition"])
         data["arguments"] = json.loads(data.pop("args"))
         data["principal"] = json.loads(data["principal"])
@@ -194,7 +197,8 @@ class ActionStore:
                 raise ApprovalError("Unknown action request")
             view = self._view(row)
             view["events"] = [dict(event) for event in db.execute(
-                "SELECT status,reviewer,policy_hash,at FROM action_events WHERE action_id=? ORDER BY rowid",
+                "SELECT status,reviewer,policy_hash,at FROM action_events WHERE action_id=? ORDER BY "
+                + self.db.rowid,
                 (request_id,))]
             receipt = db.execute("SELECT operator,reference FROM reconciliations WHERE action_id=?",
                                  (request_id,)).fetchone()
@@ -204,7 +208,7 @@ class ActionStore:
 
     def pending(self):
         with self.transaction() as db:
-            rows = db.execute("SELECT * FROM actions WHERE status='pending' AND expires>? ORDER BY rowid",
+            rows = db.execute("SELECT * FROM actions WHERE status='pending' AND expires>? ORDER BY " + self.db.rowid,
                               (time.time(),))
             return [self._view(row) for row in rows]
 
@@ -215,7 +219,7 @@ class ActionStore:
         when ``submit`` or ``review`` could not return the record.
         """
         with self.transaction() as db:
-            row = db.execute("SELECT id FROM actions WHERE json_extract(principal,'$.id')=? AND token=?",
+            row = db.execute("SELECT id FROM actions WHERE %s=? AND token=?" % self.db.json_text("principal", "id"),
                              (principal_id, token)).fetchone()
         return self.get(row["id"]) if row else None
 
@@ -251,10 +255,9 @@ class ActionStore:
             current = db.execute("SELECT * FROM registry WHERE tool=?", (tool,)).fetchone()
             if not current or current["fingerprint"] != action.fingerprint():
                 raise ApprovalError("Worker has an outdated tool definition")
-            db.execute("INSERT OR REPLACE INTO pins VALUES (?,?,?)",
-                       (action.server, tool, action.fingerprint()))
-            db.execute("INSERT INTO definition_reviews VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                       (tool, action.server, action.fingerprint(), reviewer.strip()))
+            db.execute(_UPSERT_PIN, (action.server, tool, action.fingerprint()))
+            db.execute("INSERT INTO definition_reviews VALUES (?,?,?,?,?)",
+                       (tool, action.server, action.fingerprint(), reviewer.strip(), _utc_now()))
         return {"tool": tool, "fingerprint": action.fingerprint(), "reviewer": reviewer.strip()}
 
     def submit(self, tool, arguments, session, principal, token):
@@ -264,7 +267,7 @@ class ActionStore:
         args = canonical(arguments)
         action = self.actions[tool]
         with self.transaction() as db:
-            prior = db.execute("SELECT * FROM actions WHERE json_extract(principal,'$.id')=? AND token=?",
+            prior = db.execute("SELECT * FROM actions WHERE %s=? AND token=?" % self.db.json_text("principal", "id"),
                                (principal.id, token)).fetchone()
             if prior:
                 if (prior["args"], prior["tool"], prior["session"], prior["principal"]) != (args, tool, session, key):
@@ -276,7 +279,9 @@ class ActionStore:
                 if not binding or binding["fingerprint"] != action.fingerprint():
                     raise ApprovalError("Worker has an outdated tool definition")
                 request_id = uuid.uuid4().hex
-                db.execute("INSERT INTO actions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO actions (id, principal, session, token, tool, args, fingerprint,"
+                           " status, rules, expires, reviewer, result, policy_hash, definition, generation)"
+                           " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                            (request_id, key, session, token, tool, args, action.fingerprint(),
                             "pending", "[]", time.time()+self.ttl, None, None, self.policy.fingerprint(),
                             canonical(dict(server=action.server, tool=action.definition, revision=action.revision)),
@@ -336,12 +341,11 @@ class ActionStore:
             # Hold reservations through uncertain delivery. Serialize calls until the
             # previous result has been screened and any taint written back.
             busy = db.execute("""SELECT 1 FROM actions WHERE session=?
-                AND json_extract(principal,'$.id')=? AND status IN ('dispatching','uncertain')""",
+                AND %s=? AND status IN ('dispatching','uncertain')""" % self.db.json_text("principal", "id"),
                               (row["session"], principal.id)).fetchone()
             if busy:
                 raise ApprovalError("Previous dispatch in this session awaits reconciliation")
-            db.execute("INSERT OR REPLACE INTO pins VALUES (?,?,?)",
-                       (action.server, tool, row["fingerprint"]))
+            db.execute(_UPSERT_PIN, (action.server, tool, row["fingerprint"]))
             fw.commit(tool, args, ctx)
             self._save(db, fw, ctx)
             status = "dispatching"

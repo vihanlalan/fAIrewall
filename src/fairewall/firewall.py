@@ -15,17 +15,21 @@ Design commitments, in the order they matter:
 from __future__ import annotations
 
 import functools
+from dataclasses import asdict
+import json
+import os
 import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .audit import AuditLog
 from .detectors import Detector
-from .escalation import arguments_text, route_inbound, route_outbound, run_detectors
+from .escalation import Route, arguments_text, route_inbound, route_outbound, run_detectors
+from .learning import learnable
 from .policy import Policy, Rule
 from .rules import default_rules
-from .rules.egress import EgressRule, redact_secrets
+from .rules.egress import EgressRule, redact_pii, redact_secrets
 from .rules.injection import MAX_SCAN_BYTES, scan_text
 from .types import (
     Action,
@@ -41,6 +45,15 @@ from .types import (
 
 _REDACT_HINTS = ("password", "secret", "token", "api_key", "apikey", "authorization",
                  "credential", "private_key", "ssn", "card_number")
+
+
+# Kill switch scopes: every agent, one session, or one principal (agent identity).
+FREEZE_SCOPES = ("all", "session", "principal")
+KILL_SWITCH_RULE = "killswitch.frozen"
+
+
+class KillSwitchError(ValueError):
+    """A freeze or unfreeze request that cannot be carried out as asked."""
 
 
 def redact(arguments: Dict[str, Any], cap: int = 300) -> Dict[str, Any]:
@@ -76,6 +89,12 @@ class Firewall:
         session_ttl: Optional[float] = 3600.0,
         max_sessions: Optional[int] = 10_000,
         detectors: Optional[Sequence[Detector]] = None,
+        kill_switch_path: Optional[str] = None,
+        memory: Any = None,
+        sampler: Any = None,
+        state: Any = None,
+        baseline: Any = None,
+        canaries: Any = None,
     ) -> None:
         self.policy = policy or Policy()
         self.rules: List[Rule] = list(rules) if rules is not None else list(default_rules())
@@ -98,6 +117,173 @@ class Firewall:
         self._session_locks: Dict[str, threading.RLock] = {}
         self._session_last_active: Dict[str, float] = {}
         self._lock = threading.Lock()
+        # Kill switch. Kept apart from session state on purpose: pruning or
+        # resetting a session must never lift a freeze an operator imposed.
+        self._freezes: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._kill_switch_path = kill_switch_path
+        if kill_switch_path:
+            self._load_freezes()
+        # Adaptive layer (fairewall.learning / fairewall.sampling). Both optional.
+        #   memory  -- unseen threats go to a person; their decisions are learned.
+        #   sampler -- Proof of Sampling: how often a source's content gets the
+        #              expensive deep check, from the trust it has earned.
+        self.memory = memory
+        self.sampler = sampler
+        # Shared gateway state (fairewall.state.GatewayState): sessions and
+        # freezes live in the database so every instance sees the same ones.
+        self.state = state
+        # Against attacks no detector recognises (fairewall.baseline, fairewall.canary):
+        #   baseline -- hold an agent's first-ever action of a kind in a tainted session;
+        #   canaries -- planted decoy values; one in an outgoing call is certain theft.
+        self.baseline = baseline
+        self.canaries = canaries
+        for part in (baseline, canaries):
+            if part is not None and getattr(part, "audit", None) is None:
+                part.audit = self.audit
+        for part in (memory, sampler):
+            if part is not None and getattr(part, "audit", None) is None:
+                part.audit = self.audit
+        if memory is not None and sampler is not None:
+            memory.on_label.append(self._arbitrate_source)
+
+    # ------------------------------------------------------------ kill switch
+
+    def freeze(self, scope: str = "all", target: Optional[str] = None,
+               reason: str = "", by: str = "operator") -> Dict[str, Any]:
+        """Stop agents now: every tool call in scope is blocked until unfrozen.
+
+        scope="all" halts every agent on this firewall; "session" one run;
+        "principal" one agent identity. Unlike every other rule, a freeze is
+        enforced in shadow mode too: an operator who pulls the switch means it.
+        Returns the freeze record. Freezing what is already frozen updates the
+        reason and keeps the original time.
+        """
+        key = self._freeze_key(scope, target)
+        with self._lock:
+            existing = self._freezes.get(key)
+            record = {
+                "scope": key[0], "target": key[1],
+                "reason": (reason or "").strip()[:500] or "Stopped by an operator.",
+                "by": (by or "").strip()[:100] or "operator",
+                "at": existing["at"] if existing else time.time(),
+            }
+            if self.state is not None:
+                record = self.state.put_freeze(record)
+            self._freezes[key] = record
+            self._save_freezes()
+        self.audit.append("kill_switch_engaged", {
+            "tool": "kill switch", "status": "engaged", "action": "block",
+            "session_id": key[1] if key[0] == "session" else None,
+            "principal": record["by"], "freeze": dict(record),
+            "findings": [{"rule_id": KILL_SWITCH_RULE, "action": "block",
+                          "message": "Kill switch engaged for %s: %s" % (
+                              _describe_scope(key), record["reason"])}],
+        })
+        return dict(record)
+
+    def unfreeze(self, scope: str = "all", target: Optional[str] = None,
+                 by: str = "operator") -> bool:
+        """Lift one freeze. Returns False if nothing was frozen at that scope."""
+        key = self._freeze_key(scope, target)
+        by = (by or "").strip()[:100] or "operator"
+        with self._lock:
+            record = self._freezes.pop(key, None)
+            if self.state is not None:
+                record = self.state.drop_freeze(*key) or record
+            if record is not None:
+                self._save_freezes()
+        if record is None:
+            return False
+        self.audit.append("kill_switch_released", {
+            "tool": "kill switch", "status": "released", "action": "allow",
+            "session_id": key[1] if key[0] == "session" else None,
+            "principal": by, "freeze": dict(record),
+            "findings": [{"rule_id": "killswitch.released", "action": "allow",
+                          "message": "Kill switch released for %s by %s." % (
+                              _describe_scope(key), by)}],
+        })
+        return True
+
+    def freezes(self) -> List[Dict[str, Any]]:
+        """Every active freeze, oldest first."""
+        if self.state is not None:
+            return [dict(r) for r in self._shared_freezes().values()]
+        with self._lock:
+            return sorted((dict(r) for r in self._freezes.values()), key=lambda r: r["at"])
+
+    def frozen_for(self, ctx: Context) -> Optional[Dict[str, Any]]:
+        """The freeze that stops this context, or None. A global freeze wins."""
+        if self.state is not None:
+            table = self._shared_freezes()
+        elif not self._freezes:  # hot path: nothing frozen costs one truthiness check
+            return None
+        else:
+            table = self._freezes
+        with self._lock:
+            for key in (("all", "*"), ("session", ctx.session_id),
+                        ("principal", ctx.principal.id)):
+                record = table.get(key)
+                if record is not None:
+                    return dict(record)
+        return None
+
+    def _shared_freezes(self) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        """Freezes from the shared database. If it can't be read, everything is frozen."""
+        try:
+            rows = self.state.freezes()
+        except Exception as exc:
+            return {("all", "*"): {
+                "scope": "all", "target": "*", "by": "fairewall", "at": time.time(),
+                "reason": "The shared kill-switch state could not be read (%s), so everything "
+                          "is frozen to be safe." % type(exc).__name__}}
+        return {(r["scope"], r["target"]): r for r in rows}
+
+    @staticmethod
+    def _freeze_key(scope: str, target: Optional[str]) -> Tuple[str, str]:
+        scope = (scope or "all").strip().lower()
+        if scope not in FREEZE_SCOPES:
+            raise KillSwitchError("scope must be one of %s, got %r" % (", ".join(FREEZE_SCOPES), scope))
+        if scope == "all":
+            return ("all", "*")
+        target = (target or "").strip()
+        if not target:
+            raise KillSwitchError("A %s freeze needs a target (the %s id)." % (scope, scope))
+        return (scope, target[:200])
+
+    def _save_freezes(self) -> None:
+        """Persist freezes (caller holds self._lock) so a restart cannot lift them."""
+        if not self._kill_switch_path:
+            return
+        tmp = self._kill_switch_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"freezes": list(self._freezes.values())}, fh, indent=1)
+        os.replace(tmp, self._kill_switch_path)
+
+    def _load_freezes(self) -> None:
+        """Load saved freezes. An unreadable file fails closed: everything is frozen."""
+        path = self._kill_switch_path
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                saved = json.load(fh).get("freezes", [])
+            loaded: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for r in saved:
+                key = self._freeze_key(r.get("scope", "all"), r.get("target"))
+                loaded[key] = {
+                    "scope": key[0], "target": key[1],
+                    "reason": str(r.get("reason") or "Stopped by an operator.")[:500],
+                    "by": str(r.get("by") or "operator")[:100],
+                    "at": float(r.get("at") or time.time()),
+                }
+            self._freezes.update(loaded)
+        except Exception as exc:
+            self._freezes[("all", "*")] = {
+                "scope": "all", "target": "*", "by": "fairewall", "at": time.time(),
+                "reason": "Kill switch file %s could not be read (%s), so everything is "
+                          "frozen to be safe. Fix or delete the file, then unfreeze."
+                          % (path, type(exc).__name__),
+            }
 
     # ---------------------------------------------------------------- sessions
 
@@ -116,6 +302,7 @@ class Firewall:
         manage the lifecycle manually in most integrations.
         """
         session_id = session_id or uuid.uuid4().hex[:12]
+        saved = self.state.load(session_id) if self.state is not None else None
         with self._lock:
             ctx = self._contexts.get(session_id)
             if ctx is None:
@@ -124,8 +311,57 @@ class Firewall:
             elif principal is not None:
                 ctx.principal = principal
             self._touch(session_id)
+        if self.state is not None:
+            # The database is the truth: another instance may have moved this session on.
+            self._hydrate(ctx, saved, principal)
         self._opportunistic_prune()
         return ctx
+
+    # --------------------------------------------------- shared session state
+
+    def _hydrate(self, ctx: Context, saved: Optional[Dict[str, Any]],
+                 principal: Optional[Principal] = None) -> None:
+        saved = saved or {"principal": None, "taint": [], "rules": {}}
+        ctx.taint_sources = list(saved["taint"])
+        ctx.tainted = bool(ctx.taint_sources)
+        if principal is None and saved.get("principal"):
+            ctx.principal = Principal(**saved["principal"])
+        self._restore_rules(ctx.session_id, saved["rules"])
+
+    def _restore_rules(self, session_id: str, snapshots: Dict[str, Any]) -> None:
+        for rule in self.rules:
+            if hasattr(rule, "snapshot_session"):
+                rule.reset(session_id)
+                rule.restore_session(session_id, snapshots.get(rule.id))
+
+    def _persist(self, ctx: Context, call: Optional[ToolCall] = None,
+                 mutate: Optional[Callable[[], None]] = None) -> None:
+        """Write taint (and, for a commit, budgets and rate windows) under the session lock.
+
+        Read-modify-write against the stored state, so concurrent instances
+        cannot lose each other's spend, and taint is only ever added.
+        """
+        with self.state.edit(ctx.session_id) as saved:
+            self._restore_rules(ctx.session_id, saved["rules"])
+            if call is not None:
+                for rule in self.rules:
+                    rule.commit(call, ctx, self.policy)
+            if mutate is not None:
+                mutate()
+            saved["rules"] = {rule.id: rule.snapshot_session(ctx.session_id)
+                              for rule in self.rules if hasattr(rule, "snapshot_session")}
+            taint = list(saved["taint"])
+            for source in ctx.taint_sources:
+                if source not in taint:
+                    taint.append(source)
+            saved["taint"] = taint
+            saved["principal"] = asdict(ctx.principal)
+        ctx.taint_sources = taint
+        ctx.tainted = bool(taint)
+
+    def _save_taint(self, ctx: Context) -> None:
+        if self.state is not None and ctx.tainted:
+            self._persist(ctx)
 
     def session_lock(self, session_id: str) -> threading.RLock:
         """Get or create the per-session lock synchronizing inspect, execution, and commit."""
@@ -166,7 +402,7 @@ class Firewall:
                     evicted.extend(sorted_by_age[:overflow])
 
         for sid in evicted:
-            self.reset(sid)
+            self.reset(sid, shared=False)
         return len(evicted)
 
     def _opportunistic_prune(self) -> None:
@@ -186,7 +422,12 @@ class Firewall:
         if should_prune:
             self.prune_stale_sessions()
 
-    def reset(self, session_id: Optional[str] = None) -> None:
+    def reset(self, session_id: Optional[str] = None, shared: bool = True) -> None:
+        """Forget a session (or all). ``shared=False`` only drops this process's
+        cached copy (cache eviction); the default also clears the shared database
+        row, which is what an operator clearing a session after review means."""
+        if shared and self.state is not None:
+            self.state.forget(session_id)
         for rule in self.rules:
             rule.reset(session_id)
         if session_id is None:
@@ -223,13 +464,25 @@ class Firewall:
         findings = scan_text(text, trust=trust, location=source)
         route = route_inbound(trust, self._routing_view(findings))
         tiers = ["t0"]
+        scores: List[Tuple[str, float]] = []
+        plan = self.sampler.plan(source) if (self.sampler is not None and trust is Trust.UNTRUSTED) else None
         if route.escalate and self.detectors and text:
-            tiers.append("t1")
-            findings.extend(run_detectors(self.detectors, text, route, self.policy, source))
+            tiers.extend(self._run_tier1(text, route, source, findings, scores, plan))
+        if plan is not None and plan.status == "quarantined":
+            findings.append(_quarantine_finding(plan))
+        case_id = None
+        if self.memory is not None and text and (route.escalate or _has_signal(findings)):
+            tiers.append("memory")
+            assessment = self.memory.assess(
+                kind="input", text=text, findings=findings, scores=scores,
+                source=plan.source if plan else source, session=ctx.session_id,
+                principal=ctx.principal.id, excerpt=self._excerpt(text))
+            findings, case_id = assessment.apply(findings), assessment.case_id
         findings = [self._apply_shadow(f) for f in findings]
 
         if trust is Trust.UNTRUSTED:
             ctx.taint(source)
+            self._save_taint(ctx)
 
         decision = Decision.from_findings(
             findings,
@@ -239,13 +492,18 @@ class Firewall:
             latency_ms=(time.perf_counter() - started) * 1000,
             tiers=tiers,
             route=route.reason,
+            threat_score=threat_score(findings, scores),
+            case_id=case_id,
         )
-        self._log("input_inspected", decision, ctx, {
+        extra = {
             "trust": trust.value,
             "source": source,
             "text_length": len(text or ""),
             "tainted": ctx.tainted,
-        })
+        }
+        if plan is not None:
+            extra["sampling"] = plan.view()
+        self._log("input_inspected", decision, ctx, extra)
         return decision
 
     def sanitize(self, text: str, ctx: Optional[Context] = None,
@@ -288,7 +546,26 @@ class Firewall:
         ctx = ctx or self.session(session_id, principal)
         call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
 
+        freeze = self.frozen_for(ctx)
+        if freeze is not None:
+            # Deliberately not passed through _apply_shadow: shadow mode and
+            # flag_only_rules cannot soften a freeze.
+            decision = Decision.from_findings(
+                [_freeze_finding(freeze)], call_id=call.id, session_id=ctx.session_id,
+                tool=tool, latency_ms=(time.perf_counter() - started) * 1000,
+                tiers=["t0"], route="kill_switch",
+            )
+            self._log("tool_call_inspected", decision, ctx,
+                      {"arguments": redact(call.arguments), "kill_switch": freeze})
+            return decision
+
         findings: List[Finding] = []
+        canary_hits: List[Dict[str, Any]] = []
+        if self.canaries is not None:
+            canary_hits = self.canaries.scan(
+                json.dumps(call.arguments, default=str, ensure_ascii=False), ctx.session_id)
+            if canary_hits:
+                findings.append(self.canaries.finding(canary_hits, tool))
         for rule in self.rules:
             try:
                 findings.extend(rule.evaluate(call, ctx, self.policy))
@@ -304,14 +581,34 @@ class Firewall:
                     )
                 )
 
+        if self.baseline is not None and not any(f.action is Action.BLOCK for f in findings):
+            try:
+                findings.extend(self.baseline.assess(ctx.principal.id, call.tool, call.arguments,
+                                                     self.spend_of(call.tool, call.arguments),
+                                                     ctx.tainted))
+            except Exception as exc:  # the baseline is a safety layer: failing, it holds
+                findings.append(Finding("baseline.error", Action.FLAG, Severity.HIGH,
+                                        "Action baseline unavailable (%s); holding for a person."
+                                        % type(exc).__name__, {"error": str(exc)[:200]}))
+
         risk_tier = self.policy.risk_tier(tool, call.arguments)
         route = route_outbound(risk_tier, ctx, self._routing_view(findings))
         tiers = ["t0"]
         text = arguments_text(call.arguments)
+        scores: List[Tuple[str, float]] = []
         if route.escalate and self.detectors and text:
             tiers.append("t1")
             findings.extend(run_detectors(self.detectors, text, route, self.policy,
-                                          "arguments:" + tool))
+                                          "arguments:" + tool, scores=scores))
+        case_id = None
+        if self.memory is not None and route.escalate:
+            tiers.append("memory")
+            assessment = self.memory.assess(
+                kind="tool_call", text=text, findings=findings, scores=scores, tool=call.tool,
+                arg_keys=sorted(call.arguments), high_risk=risk_tier == "high",
+                session=ctx.session_id, principal=ctx.principal.id,
+                excerpt=self._excerpt(json.dumps(redact(call.arguments), default=str)))
+            findings, case_id = assessment.apply(findings), assessment.case_id
 
         findings = [self._apply_shadow(f) for f in findings]
         decision = Decision.from_findings(
@@ -322,10 +619,76 @@ class Firewall:
             latency_ms=(time.perf_counter() - started) * 1000,
             tiers=tiers,
             route=route.reason,
+            threat_score=threat_score(findings, scores),
+            case_id=case_id,
         )
         self._log("tool_call_inspected", decision, ctx,
                   {"arguments": redact(call.arguments), "risk_tier": risk_tier})
+        if canary_hits:
+            self._canary_tripped(canary_hits, tool, ctx)
         return decision
+
+    def _canary_tripped(self, hits: List[Dict[str, Any]], tool: str, ctx: Context) -> None:
+        """Certain exfiltration: freeze the run and send every source it read back to full checks."""
+        self.canaries.record_trip(hits)
+        self.audit.append("canary_tripped", {
+            "tool": tool, "session_id": ctx.session_id, "principal": ctx.principal.id,
+            "canaries": hits, "taint_sources": list(ctx.taint_sources), "action": "block",
+            "findings": [{"rule_id": "canary.tripped", "action": "block",
+                          "message": "Planted decoy value sent to %s" % tool}]})
+        if self.shadow:
+            return  # shadow mode observes: it logs the trip but freezes nothing
+        self.freeze("session", ctx.session_id, by="fairewall canary",
+                    reason="A planted decoy value (canary) was sent to %s: the agent is "
+                           "exfiltrating data. Review the run before releasing it." % tool)
+        if self.sampler is not None:
+            for source in ctx.taint_sources:
+                for key in (source, "tool:" + source):
+                    if self.sampler.mark_suspect(key, reason="canary tripped in session %s"
+                                                 % ctx.session_id):
+                        break
+
+    def spend_of(self, tool: str, arguments: Dict[str, Any]) -> float:
+        """Money a call moves, as the financial rule reads it (0 if none)."""
+        call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
+        for rule in self.rules:
+            if rule.id == "financial":
+                try:
+                    return float(rule._spend_total(call, self.policy))
+                except Exception:
+                    return 0.0
+        return 0.0
+
+    # ---------------------------------------------------------------- run scope
+
+    def _scope_rule(self) -> Any:
+        for rule in self.rules:
+            if rule.id == "scope":
+                return rule
+        raise ValueError("This firewall has no scope rule.")
+
+    def set_scope(self, session_id: str, scope: Dict[str, Any], *, widen: bool = False,
+                  by: str = "") -> Dict[str, Any]:
+        """Declare what a run may do (see fairewall.rules.scope). Narrowing only, unless ``widen``."""
+        rule = self._scope_rule()
+        ctx = self.session(session_id)
+        result: Dict[str, Any] = {}
+
+        def apply() -> None:
+            result.update(rule.set(session_id, scope, widen=widen, by=by))
+
+        with self.session_lock(session_id):
+            if self.state is not None:
+                self._persist(ctx, mutate=apply)
+            else:
+                apply()
+        self.audit.append("scope_set", {"session_id": session_id, "scope": result,
+                                        "widened": widen, "by": by, "principal": ctx.principal.id})
+        return result
+
+    def get_scope(self, session_id: str) -> Optional[Dict[str, Any]]:
+        self.session(session_id)  # hydrates shared state
+        return self._scope_rule().get(session_id)
 
     def inspect_output(self, tool: str, output: Any, ctx: Optional[Context] = None,
                        session_id: Optional[str] = None) -> "tuple[Decision, Any]":
@@ -336,11 +699,14 @@ class Firewall:
           * a hidden instruction in *any* tool's output (a CRM note, a web page)
             taints the session, so tools fenced off from untrusted content lock;
           * credentials in the output are redacted before the model sees them;
+          * single personal identifiers (email, phone, Aadhaar, PAN, card, SSN)
+            are redacted too, as set by ``policy.output_pii_redaction`` minus
+            the tool's ``output_pii_allowed``;
           * bulk personal data is flagged in the audit log.
 
-        Returns ``(decision, output)``; ``output`` is the redacted text when a
-        secret was found, otherwise the original value unchanged. Only string
-        output is inspected; other types pass through.
+        Returns ``(decision, output)``; ``output`` is the redacted text when
+        anything was redacted, otherwise the original value unchanged. Only
+        string output is inspected; other types pass through.
         """
         started = time.perf_counter()
         ctx = ctx or self.session(session_id)
@@ -364,16 +730,44 @@ class Firewall:
                                     action=Action.FLAG, severity=f.severity,
                                     message="Tool %s returned text with %s" % (tool, f.message),
                                     evidence=dict(f.evidence, tool=tool)))
-        if untrusted or injected:
+        # Tier 1 and memory on what the tool returned. Nothing can be blocked
+        # here (the call already ran), so their verdicts become flags plus taint.
+        scores: List[Tuple[str, float]] = []
+        plan = self.sampler.plan("tool:" + tool) if self.sampler is not None else None
+        tiers = ["t0"]
+        content: List[Finding] = list(findings)
+        if self.detectors and (untrusted or injected or plan is not None):
+            tiers.extend(self._run_tier1(head, Route(True, "tool_output"), source, content,
+                                         scores, plan))
+        if plan is not None and plan.status == "quarantined":
+            content.append(_quarantine_finding(plan))
+        case_id = None
+        if self.memory is not None and (untrusted or plan is not None or _has_signal(content)):
+            tiers.append("memory")
+            assessment = self.memory.assess(
+                kind="output", text=head, findings=content, scores=scores, tool=tool,
+                source=plan.source if plan else "tool:" + tool, session=ctx.session_id,
+                principal=ctx.principal.id, excerpt=self._excerpt(head))
+            content, case_id = assessment.apply(content), assessment.case_id
+        findings = [_as_output_flag(f, tool) for f in content]
+        if untrusted or injected or any(_is_threat(f) for f in findings):
             ctx.taint(tool)
+            self._save_taint(ctx)
 
-        redacted, secrets = redact_secrets(output)
+        redacted, secrets, pii = self.redact_text(output, tool)
         if secrets:
             findings.append(Finding(
                 rule_id="output.secret_redacted", action=Action.FLAG, severity=Severity.HIGH,
                 message="Tool %s returned %s; redacted before the agent saw it."
                         % (tool, ", ".join(s.replace("_", " ") for s in secrets)),
                 evidence={"tool": tool, "secret_types": secrets}))
+        if pii:
+            findings.append(Finding(
+                rule_id="output.pii_redacted", action=Action.FLAG, severity=Severity.MEDIUM,
+                message="Tool %s returned personal data (%s); redacted before the agent saw it."
+                        % (tool, ", ".join("%d %s" % (n, k) for k, n in sorted(pii.items()))),
+                # Counts only: the audit log must not hold the values it redacted.
+                evidence={"tool": tool, "pii_counts": dict(pii)}))
 
         for f in EgressRule()._check_bulk_pii(source, head):
             findings.append(Finding(
@@ -385,15 +779,44 @@ class Firewall:
             [self._apply_shadow(f) for f in findings],
             session_id=ctx.session_id, tool=source,
             latency_ms=(time.perf_counter() - started) * 1000,
-            route="tool_output",
+            route="tool_output", tiers=tiers,
+            threat_score=threat_score(findings, scores), case_id=case_id,
         )
-        self._log("tool_output_inspected", decision, ctx, {
-            "output_length": len(output), "tainted": ctx.tainted, "redacted": bool(secrets)})
-        return decision, (redacted if secrets else output)
+        changed = bool(secrets or pii)
+        extra = {"output_length": len(output), "tainted": ctx.tainted, "redacted": changed}
+        if plan is not None:
+            extra["sampling"] = plan.view()
+        self._log("tool_output_inspected", decision, ctx, extra)
+        return decision, (redacted if changed else output)
+
+    def redact_text(self, text: str, tool: Optional[str] = None
+                    ) -> Tuple[str, List[str], Dict[str, int]]:
+        """Redact credentials and personal data from text. Pure: logs nothing.
+
+        Returns ``(text, secret_types, pii_counts)``. Credentials are always
+        redacted; personal data per ``policy.output_pii_redaction``, minus what
+        *tool*'s ``output_pii_allowed`` lets through.
+        """
+        text, secrets = redact_secrets(text)
+        types = list(self.policy.output_pii_redaction or [])
+        tool_policy = self.policy.tool(tool) if tool else None
+        if tool_policy and tool_policy.output_pii_allowed:
+            types = [t for t in types if t not in tool_policy.output_pii_allowed]
+        pii: Dict[str, int] = {}
+        if types:
+            text, pii = redact_pii(text, types)
+        return text, secrets, pii
 
     def commit(self, tool: str, arguments: Dict[str, Any], ctx: Context) -> None:
         """Charge budgets and rate limits for a call that was actually performed."""
         call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
+        if self.baseline is not None and not ctx.tainted:
+            # Only clean runs teach the baseline: an injected action can't make itself normal.
+            self.baseline.observe(ctx.principal.id, call.tool, call.arguments,
+                                  self.spend_of(call.tool, call.arguments), "clean")
+        if self.state is not None:
+            self._persist(ctx, call)
+            return
         for rule in self.rules:
             rule.commit(call, ctx, self.policy)
 
@@ -447,6 +870,7 @@ class Firewall:
         if tool_policy and tool_policy.produces_untrusted_output:
             tool_name = getattr(tool, "name", str(tool))
             ctx.taint(tool_name)
+            self._save_taint(ctx)
 
         self._log("tool_call_executed", decision, ctx, dict(extra or {}))
         if isinstance(result, str):
@@ -497,6 +921,41 @@ class Firewall:
 
     # --------------------------------------------------------------- internals
 
+    def _run_tier1(self, text: str, route: Route, location: str, findings: List[Finding],
+                   scores: List[Tuple[str, float]], plan: Any) -> List[str]:
+        """Run the detectors, sampling the deep ones per source. Returns the tiers that ran.
+
+        Without a sampler every detector runs (the original behaviour). With
+        one, deep detectors (e.g. Model Armor) run only when the plan samples
+        this item; their verdict is reported back as the source's check result.
+        """
+        detectors = self.detectors
+        if plan is not None and not plan.sampled:
+            detectors = [d for d in detectors if not getattr(d, "deep", False)]
+        if not detectors:
+            return []
+        found = run_detectors(detectors, text, route, self.policy, location, scores=scores)
+        findings.extend(found)
+        tiers = ["t1"]
+        deep = {d.name for d in detectors if getattr(d, "deep", False)}
+        if plan is not None and deep:
+            tiers.append("deep")
+            ran = {name for name, _ in scores}
+            if deep & ran:  # the deep check answered (an outage reports nothing)
+                hit = any(f.rule_id in {"detector." + n for n in deep}
+                          and f.action is not Action.ALLOW for f in found)
+                self.sampler.record(plan, flagged=hit)
+        return tiers
+
+    def _arbitrate_source(self, case: Any, verdict: str) -> None:
+        """A person labelled a case: settle its source's stake (slash or clear)."""
+        if case.source and self.sampler is not None:
+            self.sampler.arbitrate(case.source, verdict == "malicious", case.reviewer or "", case.id)
+
+    def _excerpt(self, text: str) -> str:
+        """What a reviewer sees of the content: the head, with secrets and PII redacted."""
+        return self.redact_text((text or "")[:600])[0]
+
     def _routing_view(self, findings: List[Finding]) -> List[Finding]:
         # Route on what *would* happen ignoring shadow mode, but honour
         # flag_only_rules: an operator who distrusts a rule's block wants T1's opinion.
@@ -530,3 +989,70 @@ class Firewall:
             "shadow": self.shadow,
             **extra,
         })
+
+
+_SEVERITY_PRIOR = {Severity.CRITICAL: 0.95, Severity.HIGH: 0.85, Severity.MEDIUM: 0.6,
+                   Severity.LOW: 0.3, Severity.INFO: 0.0}
+
+
+def _is_threat(f: Finding) -> bool:
+    return learnable(f) and f.action is not Action.ALLOW
+
+
+def _has_signal(findings: Sequence[Finding]) -> bool:
+    return any(_is_threat(f) for f in findings)
+
+
+def threat_score(findings: Sequence[Finding], scores: Sequence[Tuple[str, float]] = ()) -> float:
+    """Noisy-OR of every threat signal: detector scores, rule severities, learned matches.
+
+    Deterministic signatures contribute a prior by severity; detectors their
+    own score; the memory its similarity or probability. Lifted (ALLOW)
+    findings and non-threat rules (money, rate, schema) do not count.
+    """
+    probs = [s for _, s in scores]
+    for f in findings:
+        # Detectors are counted by their raw score; "never seen before" is a
+        # statement about novelty, not evidence of an attack.
+        if not _is_threat(f) or f.rule_id.startswith("detector.") or f.rule_id == "adaptive.novel_threat":
+            continue
+        ev = f.evidence or {}
+        probs.append(float(ev.get("similarity") or ev.get("probability") or _SEVERITY_PRIOR[f.severity]))
+    miss = 1.0
+    for p in probs:
+        miss *= 1.0 - min(1.0, max(0.0, p))
+    return 1.0 - miss
+
+
+def _quarantine_finding(plan: Any) -> Finding:
+    return Finding(
+        rule_id="sampling.quarantined_source", action=Action.FLAG, severity=Severity.HIGH,
+        message="Source %s is quarantined: a person confirmed it sent an injection. Every item "
+                "is deep-checked and needs review until it earns trust back." % plan.source,
+        evidence={"source": plan.source})
+
+
+def _as_output_flag(f: Finding, tool: str) -> Finding:
+    """Tool output can't be blocked (the call ran): a block becomes a flag that taints."""
+    if f.action is not Action.BLOCK:
+        return f
+    return Finding(f.rule_id, Action.FLAG, f.severity,
+                   f.message + " (in %s's output; the session is now tainted)" % tool,
+                   dict(f.evidence, would_block=True))
+
+
+def _describe_scope(key: Tuple[str, str]) -> str:
+    return "every agent" if key[0] == "all" else "%s %s" % (key[0], key[1])
+
+
+def _freeze_finding(freeze: Dict[str, Any]) -> Finding:
+    key = (freeze["scope"], freeze["target"])
+    return Finding(
+        rule_id=KILL_SWITCH_RULE,
+        action=Action.BLOCK,
+        severity=Severity.CRITICAL,
+        message="Kill switch is on for %s (by %s): %s No tool calls run until it is released."
+                % (_describe_scope(key), freeze["by"], freeze["reason"].rstrip(".") + "."),
+        evidence={"scope": freeze["scope"], "target": freeze["target"], "by": freeze["by"],
+                  "since": freeze["at"]},
+    )

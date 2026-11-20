@@ -72,3 +72,9 @@ tools/_cache/
 # Refund desk demo data and local secrets
 examples/refunds/data/
 examples/refunds/.env
+
+# Local databases (gateway state, learning, control plane, anchors)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db

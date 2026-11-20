@@ -11,14 +11,13 @@ Run it:  python examples/refunds/workflow.py
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fairewall import Policy, Principal
 from fairewall.actions import ActionStore, RegisteredAction
+from fairewall.db import Database, is_postgres, with_schema
 
 HERE = Path(__file__).resolve().parent
 POLICY_PATH = HERE / "policy.json"
@@ -67,35 +66,34 @@ class LedgerFault(Exception):
 class Ledger:
     """Sandbox payment ledger. Each refund row is keyed by its idempotency key."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        with self._tx() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS orders (
+    def __init__(self, path) -> None:
+        # A file path (SQLite) or a postgresql:// URL. On Postgres the ledger
+        # gets its own schema, standing in for a separate payment system.
+        self.path = path
+        self.db = Database(str(path), schema="refund_ledger")
+        self.db.create("""
+            CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, item TEXT NOT NULL,
                 paid_cents INTEGER NOT NULL CHECK (paid_cents >= 0),
                 refunded_cents INTEGER NOT NULL DEFAULT 0 CHECK (refunded_cents >= 0),
-                CHECK (refunded_cents <= paid_cents))""")
-            db.execute("""CREATE TABLE IF NOT EXISTS refunds (
+                CHECK (refunded_cents <= paid_cents));
+            CREATE TABLE IF NOT EXISTS refunds (
                 receipt TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
                 order_id TEXT NOT NULL REFERENCES orders(order_id),
                 amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
                 created_at REAL NOT NULL)""")
 
-    @contextmanager
     def _tx(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                db.execute("BEGIN IMMEDIATE")
-                yield db
-        finally:
-            db.close()
+        return self.db.transaction()
+
+    def close(self) -> None:
+        self.db.close()
 
     def seed(self, orders=DEMO_ORDERS) -> None:
         with self._tx() as db:
             for order_id, item, paid, refunded in orders:
-                db.execute("INSERT OR IGNORE INTO orders VALUES (?,?,?,?)", (order_id, item, paid, refunded))
+                db.execute("INSERT INTO orders VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
+                           (order_id, item, paid, refunded))
 
     def order(self, order_id: str) -> Optional[Dict[str, Any]]:
         with self._tx() as db:
@@ -168,14 +166,19 @@ class RefundDesk:
     """The two tools, the ledger and the fAIrewall action store, wired together.
 
     ``fault`` simulates a ledger failure on refund calls (see ``Ledger.refund``).
+
+    ``data_dir`` is a directory (one SQLite file per store) or a postgresql://
+    URL (Cloud SQL): then each store gets its own schema in that database.
     """
 
     def __init__(self, data_dir, policy: Optional[Policy] = None, *, fault: Optional[str] = None,
                  seed: bool = True) -> None:
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = str(data_dir) if is_postgres(data_dir) else Path(data_dir)
+        if not is_postgres(data_dir):
+            self.data_dir.mkdir(parents=True, exist_ok=True)
         self.fault = fault
-        self.ledger = Ledger(self.data_dir / "ledger.sqlite")
+        self.on_close: List[Any] = []  # other stores to close with this one (e.g. the run store)
+        self.ledger = Ledger(self.location("ledger"))
         if seed:
             self.ledger.seed()
         self.policy = policy or Policy.from_file(str(POLICY_PATH))
@@ -183,7 +186,13 @@ class RefundDesk:
             RegisteredAction("sandbox-ledger", LOOKUP_ORDER, "v1", self._lookup),
             RegisteredAction("sandbox-ledger", REFUND, "v1", self._refund),
         ]
-        self.store = ActionStore(self.data_dir / "actions.sqlite", self.policy, self.actions)
+        self.store = ActionStore(self.location("actions"), self.policy, self.actions)
+
+    def location(self, name: str) -> str:
+        """Where store *name* lives: a SQLite file, or a schema in the Postgres database."""
+        if is_postgres(self.data_dir):
+            return with_schema(self.data_dir, "refund_" + name)
+        return str(self.data_dir / (name + ".sqlite"))
 
     # ------------------------------------------------------------ handlers
 
@@ -200,7 +209,10 @@ class RefundDesk:
 
     def close(self) -> None:
         """Release database connections (before deleting the data directory)."""
+        for close in self.on_close:
+            close()
         self.store.close()
+        self.ledger.close()
 
     # --------------------------------------------------------------- setup
 

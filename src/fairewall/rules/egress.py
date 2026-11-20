@@ -12,10 +12,10 @@ using an authorized tool with an authorized key:
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import urlparse
 
-from ..policy import Policy, Rule
+from ..policy import PII_TYPES, Policy, Rule
 from ..types import Action, Context, Finding, Severity, ToolCall
 from .injection import MAX_SCAN_BYTES, is_oversize
 
@@ -56,6 +56,134 @@ def redact_secrets(text: str) -> Tuple[str, List[str]]:
         if n:
             found.append(name)
     return text, found
+
+
+# --------------------------------------------------------------- single PII items
+#
+# Bulk PII (below) catches a breach in progress. These catch the single record:
+# one customer's Aadhaar number in a CRM lookup is enough to be a DPDP Act
+# incident if it lands in a third-party model's context or logs.
+
+# Aadhaar: 12 digits, first digit 2-9, often grouped 4-4-4. The last digit is a
+# Verhoeff check digit, which rules out ~90% of random 12-digit IDs.
+_AADHAAR = re.compile(r"(?<![\w-])[2-9]\d{3}([ -]?)\d{4}\1\d{4}(?![\w-])")
+# PAN: 5 letters, 4 digits, 1 letter. The 4th letter is the holder type
+# (P person, C company, H HUF, F firm, A AOP, T trust, B BOI, L local body,
+# J juridical person, G government).
+_PAN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{3}[PCHFATBLJGpchfatbljg][A-Za-z]\d{4}[A-Za-z](?![A-Za-z0-9])")
+_SSN = re.compile(r"(?<![\w-])\d{3}-\d{2}-\d{4}(?![\w-])")
+# Indian mobile: optional +91 / 0091 / 0 prefix, then 10 digits starting 6-9,
+# optionally split 5-5. Not preceded by a letter, digit, # or - so order
+# numbers such as ORD-9876543210 are left alone.
+_PHONE_IN = re.compile(r"(?<![\w+#/-])(?:(?:\+|00)91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?![\w-])")
+# Indian landline with STD code: 0 + 2-4 digit code + local number, e.g. 022-2345-6789.
+_PHONE_IN_LANDLINE = re.compile(r"(?<![\w+#/-])0\d{2,4}[\s-]\d{3,4}[\s-]?\d{4}(?![\w-])")
+# International numbers written with a leading +, e.g. +1 415 555 0100.
+_PHONE_INTL = re.compile(r"(?<![\w+])\+[1-9][\d\s().-]{7,18}\d(?![\w-])")
+# North American numbers written with separators, e.g. (415) 555-0100.
+_PHONE_NANP = re.compile(r"(?<![\w-])(?:\(\d{3}\)\s?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\w-])")
+
+# Every numeric identifier above (phone, card, Aadhaar, SSN) has at least nine
+# digits with at most two separator characters between neighbours. Text with no
+# such run skips all of those patterns: one cheap pass instead of seven.
+_NUMERIC_ID_HINT = re.compile(r"\d(?:[\s().+-]{0,2}\d){8}")
+
+# Verhoeff tables (dihedral group D5), used by UIDAI for the Aadhaar check digit.
+_VERHOEFF_D = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (1, 2, 3, 4, 0, 6, 7, 8, 9, 5),
+    (2, 3, 4, 0, 1, 7, 8, 9, 5, 6), (3, 4, 0, 1, 2, 8, 9, 5, 6, 7),
+    (4, 0, 1, 2, 3, 9, 5, 6, 7, 8), (5, 9, 8, 7, 6, 0, 4, 3, 2, 1),
+    (6, 5, 9, 8, 7, 1, 0, 4, 3, 2), (7, 6, 5, 9, 8, 2, 1, 0, 4, 3),
+    (8, 7, 6, 5, 9, 3, 2, 1, 0, 4), (9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
+)
+_VERHOEFF_P = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (1, 5, 7, 6, 2, 8, 3, 0, 9, 4),
+    (5, 8, 0, 3, 7, 9, 6, 1, 4, 2), (8, 9, 1, 6, 0, 4, 3, 5, 2, 7),
+    (9, 4, 5, 3, 1, 2, 6, 8, 7, 0), (4, 2, 8, 6, 5, 7, 3, 9, 0, 1),
+    (2, 7, 9, 3, 8, 0, 6, 4, 1, 5), (7, 0, 4, 6, 9, 1, 3, 2, 5, 8),
+)
+
+
+def verhoeff_valid(number: str) -> bool:
+    """True if the digit string carries a valid Verhoeff check digit."""
+    check = 0
+    for i, ch in enumerate(reversed(number)):
+        check = _VERHOEFF_D[check][_VERHOEFF_P[i % 8][int(ch)]]
+    return check == 0
+
+
+def _digits(text: str) -> str:
+    return "".join(c for c in text if c.isdigit())
+
+
+def redact_pii(text: str, types: Iterable[str] = PII_TYPES) -> Tuple[str, Dict[str, int]]:
+    """Replace each personal identifier of the given *types* with a placeholder.
+
+    Returns the redacted text and a count per type (never the values, so the
+    result is safe to log). Cards keep their last four digits, which is what a
+    support agent needs and what PCI DSS allows to be shown.
+
+    Order matters: emails first (they contain digits), then the checksummed
+    numbers (Aadhaar, cards), then the looser phone shapes last, so a phone
+    pattern never eats part of an Aadhaar or card number.
+    """
+    wanted = set(types)
+    counts: Dict[str, int] = {}
+
+    def bump(kind: str) -> None:
+        counts[kind] = counts.get(kind, 0) + 1
+
+    numeric = bool(wanted & {"phone", "aadhaar", "card", "ssn"}) and bool(
+        _NUMERIC_ID_HINT.search(text))
+
+    if "email" in wanted and "@" in text:
+        def _email(_m: "re.Match[str]") -> str:
+            bump("email")
+            return "[REDACTED:email]"
+        text = _EMAIL.sub(_email, text)
+
+    if "aadhaar" in wanted and numeric:
+        def _aadhaar(m: "re.Match[str]") -> str:
+            if not verhoeff_valid(_digits(m.group(0))):
+                return m.group(0)
+            bump("aadhaar")
+            return "[REDACTED:aadhaar]"
+        text = _AADHAAR.sub(_aadhaar, text)
+
+    if "card" in wanted and numeric:
+        def _card(m: "re.Match[str]") -> str:
+            digits = _digits(m.group(0))
+            if not _luhn_valid(digits):
+                return m.group(0)
+            bump("card")
+            return "[REDACTED:card ending %s]" % digits[-4:]
+        text = _CARD_CANDIDATE.sub(_card, text)
+
+    if "pan" in wanted:
+        def _pan(_m: "re.Match[str]") -> str:
+            bump("pan")
+            return "[REDACTED:pan]"
+        text = _PAN.sub(_pan, text)
+
+    if "ssn" in wanted and numeric:
+        def _ssn(_m: "re.Match[str]") -> str:
+            bump("ssn")
+            return "[REDACTED:ssn]"
+        text = _SSN.sub(_ssn, text)
+
+    if "phone" in wanted and numeric:
+        def _phone(m: "re.Match[str]") -> str:
+            n = len(_digits(m.group(0)))
+            if not 10 <= n <= 15:
+                return m.group(0)
+            bump("phone")
+            return "[REDACTED:phone]"
+        for pattern in (_PHONE_IN, _PHONE_IN_LANDLINE, _PHONE_INTL, _PHONE_NANP):
+            if pattern is _PHONE_INTL and "+" not in text:
+                continue
+            text = pattern.sub(_phone, text)
+
+    return text, counts
 
 
 def _luhn_valid(number: str) -> bool:

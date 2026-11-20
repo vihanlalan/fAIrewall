@@ -400,6 +400,28 @@ class GovernanceSDK:
             self._session_stats.pop(session_id, None)
 
     # ------------------------------------------------------------------
+    # Kill switch
+    # ------------------------------------------------------------------
+
+    def freeze(self, scope: str = "all", target: Optional[str] = None,
+               reason: str = "", by: str = "operator") -> Dict[str, Any]:
+        """Stop agents now. ``scope`` is "all", "session" or "principal".
+
+        Every tool call in scope is blocked, even in shadow mode, until
+        :meth:`unfreeze` is called.
+        """
+        return self._fw.freeze(scope, target, reason=reason, by=by)
+
+    def unfreeze(self, scope: str = "all", target: Optional[str] = None,
+                 by: str = "operator") -> bool:
+        """Lift a freeze. Returns False if nothing was frozen at that scope."""
+        return self._fw.unfreeze(scope, target, by=by)
+
+    def freezes(self) -> List[Dict[str, Any]]:
+        """Every active freeze."""
+        return self._fw.freezes()
+
+    # ------------------------------------------------------------------
     # Audit
     # ------------------------------------------------------------------
 

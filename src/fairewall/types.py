@@ -132,6 +132,12 @@ class Decision:
     # Which inspection tiers ran ("t0" = rules, "t1" = detectors) and why.
     tiers: List[str] = field(default_factory=lambda: ["t0"])
     route: str = ""
+    # Combined threat score in [0, 1] from content rules, detectors and the
+    # learned memory (noisy-OR). Reported for people and dashboards; the
+    # action itself still comes from the findings.
+    threat_score: float = 0.0
+    # The learning case opened for this event, when a person must decide.
+    case_id: Optional[str] = None
 
     @property
     def allowed(self) -> bool:
@@ -156,6 +162,16 @@ class Decision:
         return "; ".join(f"[{f.rule_id}] {f.message}" for f in chosen)
 
     @property
+    def verdict(self) -> str:
+        """"approve", "human" (a person must decide) or "block"."""
+        if self.action is Action.BLOCK:
+            blockers = [f.rule_id for f in self.findings if f.action is Action.BLOCK]
+            if blockers and all(r == "schema.human_approval_required" for r in blockers):
+                return "human"
+            return "block"
+        return "human" if self.action is Action.FLAG else "approve"
+
+    @property
     def severity(self) -> Severity:
         if not self.findings:
             return Severity.INFO
@@ -167,6 +183,9 @@ class Decision:
             "session_id": self.session_id,
             "tool": self.tool,
             "action": self.action.value,
+            "verdict": self.verdict,
+            "threat_score": round(self.threat_score, 4),
+            "case_id": self.case_id,
             "severity": self.severity.value,
             "timestamp": self.timestamp,
             "latency_ms": round(self.latency_ms, 3),

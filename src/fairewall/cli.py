@@ -16,12 +16,18 @@ from .types import Action, Decision, Principal, Trust
 
 
 def _detectors(args: argparse.Namespace) -> List[Detector]:
-    return build_detectors(args.detector or [], args.onnx_model, args.onnx_tokenizer)
+    return build_detectors(args.detector or [], args.onnx_model, args.onnx_tokenizer,
+                           getattr(args, "model_armor_template", None))
 
 
 def _add_detector_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--detector", action="append", choices=["heuristic", "learned", "onnx"],
-                   help="Enable a tier-1 detector (repeatable). Runs only on escalated calls.")
+    p.add_argument("--detector", action="append",
+                   choices=["heuristic", "learned", "onnx", "model_armor"],
+                   help="Enable a tier-1 detector (repeatable, runs in the order given). "
+                        "Runs only on escalated calls.")
+    p.add_argument("--model-armor-template", dest="model_armor_template",
+                   help="Model Armor template, projects/P/locations/L/templates/T "
+                        "(with --detector model_armor; or set MODEL_ARMOR_TEMPLATE)")
     p.add_argument("--onnx-model", help="Path to ONNX classifier (with --detector onnx)")
     p.add_argument("--onnx-tokenizer", help="Path to tokenizer.json (with --detector onnx)")
 
@@ -261,6 +267,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         api_key=args.api_key,
         detectors=_detectors(args),
         reviewer_api_key=args.reviewer_key,
+        kill_switch_path=args.kill_switch_file,
+        control_plane_url=args.control_plane,
+        gateway_token=args.gateway_token,
+        learning=args.learning_db,
+        source_sampling=args.source_sampling,
+        database=args.database,
+        action_baseline=args.action_baseline,
+        canaries=args.canaries or None,
     )
     return 0
 
@@ -374,6 +388,114 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_armor(args: argparse.Namespace) -> int:
+    """Create a Model Armor template for fAIrewall, or screen one text with it."""
+    from .integrations.model_armor import ModelArmorDetector, ModelArmorError, create_template
+
+    try:
+        if args.ma_command == "create-template":
+            created = create_template(args.project, args.location, args.template_id,
+                                      confidence=args.confidence,
+                                      malicious_uris=not args.no_malicious_uris)
+            name = created.get("name") or (f"projects/{args.project}/locations/{args.location}"
+                                           f"/templates/{args.template_id}")
+            print(f"Created Model Armor template {name}")
+            print("Use it with:\n  fairewall serve --detector learned --detector model_armor "
+                  f"--model-armor-template {name}")
+            return 0
+        det = ModelArmorDetector(args.template)
+        result = det.detect(args.text)
+        print(json.dumps({"score": round(result.score, 4), "label": result.label,
+                          "evidence": result.evidence}, indent=2))
+        return 0
+    except (ModelArmorError, ValueError) as exc:
+        print(f"Model Armor: {exc}", file=sys.stderr)
+        return 1
+
+
+def _anchor_backends(args: argparse.Namespace) -> list:
+    from .anchor import BucketBackend, EvmBackend, FileBackend
+    backends = []
+    if getattr(args, "dir", None):
+        backends.append(FileBackend(args.dir))
+    if getattr(args, "bucket", None):
+        backends.append(BucketBackend(args.bucket))
+    if getattr(args, "evm", False) or getattr(args, "rpc", None):
+        backends.append(EvmBackend(rpc_url=args.rpc))
+    return backends
+
+
+def cmd_anchor(args: argparse.Namespace) -> int:
+    """Seal the audit trail into Merkle batches, publish them, verify, and prove records."""
+    from .anchor import AnchorError, Anchorer, EvmBackend, check_proof
+
+    if args.anchor_command == "check-proof":
+        with open(args.proof, encoding="utf-8") as fh:
+            proof = json.load(fh)
+        result = check_proof(proof, backend=EvmBackend(rpc_url=args.rpc) if args.rpc else None)
+        print(json.dumps(result, indent=2))
+        return 0 if result["valid"] else 1
+
+    database = args.database or os.environ.get("FAIREWALL_DATABASE_URL")
+    if not database:
+        print("Give --database (or FAIREWALL_DATABASE_URL): the gateway's shared database.", file=sys.stderr)
+        return 2
+    anchorer = Anchorer(database, _anchor_backends(args))
+    try:
+        if args.anchor_command == "run":
+            if args.interval:
+                anchorer.run_forever(args.interval)
+            out = anchorer.run_once()
+            if out["sealed"]:
+                print("Sealed batch %d: %d records, root %s" % (
+                    out["sealed"]["batch"], out["sealed"]["size"], out["sealed"]["root"]))
+            else:
+                print("Nothing new to seal.")
+            for a in out["published"]:
+                print("Batch %d: %s %s" % (a["batch"], a["status"], a.get("error") or ""))
+                for name, receipt in a["receipts"].items():
+                    print("  %s: %s" % (name, receipt.get("explorer") or receipt.get("object")
+                                        or receipt.get("path") or receipt))
+            return 0
+        if args.anchor_command == "verify":
+            report = anchorer.verify(online=args.online)
+            print(json.dumps(report, indent=2))
+            return 0 if report["valid"] else 1
+        if args.anchor_command == "proof":
+            print(json.dumps(anchorer.proof(args.log, args.seq), indent=2))
+            return 0
+        if args.anchor_command == "list":
+            for a in anchorer.anchors():
+                print("%6d  %s  %6d records  %-9s %s" % (a["batch"], a["commitment"][:16], a["size"],
+                                                         a["status"], a.get("error") or ""))
+            return 0
+    except AnchorError as exc:
+        print("Anchor: %s" % exc, file=sys.stderr)
+        return 1
+    return 2
+
+
+def cmd_control_plane(args: argparse.Namespace) -> int:
+    """Run the control plane: policy versions, rollout, fleet health, fleet kill switch."""
+    try:
+        import uvicorn  # type: ignore
+        from .control import create_control_app
+    except ImportError as exc:
+        print(f"Failed to load the control plane: {exc}. Install with: pip install -e \".[proxy]\"",
+              file=sys.stderr)
+        return 2
+    import os
+    admin_key = args.admin_key or os.environ.get("FAIREWALL_ADMIN_KEY")
+    app = create_control_app(db_path=args.db, admin_key=admin_key)
+    shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    print(f"[fAIrewall] Control plane at http://{shown}:{args.port}/  (database: {args.db})")
+    if not admin_key:
+        print("[fAIrewall] WARNING: no admin key. Anyone who can reach this port can change policy. "
+              "Set --admin-key or FAIREWALL_ADMIN_KEY.", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fairewall",
@@ -446,6 +568,43 @@ def main(argv: Optional[List[str]] = None) -> int:
              "Can also be set via FAIREWALL_REVIEWER_KEY. Defaults to --api-key; use a "
              "different key so an agent cannot approve its own calls.",
     )
+    p_serve.add_argument(
+        "--kill-switch-file",
+        dest="kill_switch_file",
+        default=None,
+        help="File that keeps kill-switch freezes across restarts (also "
+             "FAIREWALL_KILL_SWITCH_FILE). Without it, a restart lifts every freeze.",
+    )
+    p_serve.add_argument(
+        "--control-plane", dest="control_plane", default=None,
+        help="Control plane URL to take policy from and report to (also FAIREWALL_CONTROL_PLANE_URL)")
+    p_serve.add_argument(
+        "--gateway-token", dest="gateway_token", default=None,
+        help="This gateway's token from the control plane (also FAIREWALL_GATEWAY_TOKEN)")
+    p_serve.add_argument(
+        "--database", dest="database", default=None,
+        help="Shared state for several instances: SQLite file or postgresql:// URL (also "
+             "FAIREWALL_DATABASE_URL). Sessions, freezes, approvals, audit chain and learning "
+             "live there; without it, everything stays in this process.")
+    p_serve.add_argument(
+        "--action-baseline", dest="action_baseline", nargs="?", const="tainted", default=None,
+        choices=["tainted", "always", "off"],
+        help="Hold an agent's first-ever action of a kind (new tool, destination, or a much larger "
+             "amount) for a person: in tainted sessions (default), always, or just observe (off). "
+             "Also FAIREWALL_ACTION_BASELINE.")
+    p_serve.add_argument(
+        "--canaries", action="store_true",
+        help="Enable decoy values: issue them with POST /v1/canaries and plant them where an "
+             "attacker would look. One in an outgoing call blocks it and freezes the run "
+             "(also FAIREWALL_CANARIES=1).")
+    p_serve.add_argument(
+        "--learning-db", dest="learning_db", default=None,
+        help="Turn on adaptive learning: unseen threats go to a reviewer and their decisions "
+             "are learned. A SQLite file or postgresql:// URL (also FAIREWALL_LEARNING_DB).")
+    p_serve.add_argument(
+        "--source-sampling", dest="source_sampling", action="store_true",
+        help="Proof of Sampling per content source: new sources fully deep-checked, trusted "
+             "ones sampled (needs --learning-db; also FAIREWALL_SOURCE_SAMPLING=1).")
     _add_detector_args(p_serve)
     p_serve.set_defaults(func=cmd_serve)
 
@@ -529,6 +688,64 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_demo.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
     p_demo.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     p_demo.set_defaults(func=cmd_demo)
+
+    # control plane
+    p_cp = subparsers.add_parser("control-plane",
+                                 help="Run the control plane that manages policy for many gateways")
+    p_cp.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
+    p_cp.add_argument("--port", type=int, default=9000, help="Port (default: 9000)")
+    p_cp.add_argument("--db", default="fairewall-control.sqlite",
+                      help="SQLite file for versions, gateways and events")
+    p_cp.add_argument("--admin-key", dest="admin_key", default=None,
+                      help="Key for the dashboard and API (also FAIREWALL_ADMIN_KEY)")
+    p_cp.set_defaults(func=cmd_control_plane)
+
+    # anchor
+    p_an = subparsers.add_parser("anchor", help="Anchor the audit trail: Merkle batches on a locked "
+                                                "bucket and a public chain")
+    an_sub = p_an.add_subparsers(dest="anchor_command", required=True)
+    for name, text in (("run", "Seal new audit records into a batch and publish it"),
+                       ("verify", "Re-derive every batch from the records and check the links"),
+                       ("proof", "Print a proof that one record was anchored"),
+                       ("list", "List batches and where each was published")):
+        sp = an_sub.add_parser(name, help=text)
+        sp.add_argument("--database", help="Gateway database (or FAIREWALL_DATABASE_URL)")
+        sp.add_argument("--dir", help="Also write each batch to this directory")
+        sp.add_argument("--bucket", help="Cloud Storage bucket with a locked retention policy")
+        sp.add_argument("--evm", action="store_true",
+                        help="Post the commitment to an EVM chain (key: FAIREWALL_ANCHOR_KEY; "
+                             "RPC: FAIREWALL_ANCHOR_RPC, default Base Sepolia)")
+        sp.add_argument("--rpc", help="EVM JSON-RPC URL (implies --evm)")
+        if name == "run":
+            sp.add_argument("--interval", type=float, default=0,
+                            help="Keep running, sealing every N seconds (default: once)")
+        if name == "verify":
+            sp.add_argument("--online", action="store_true", help="Also check the bucket and chain copies")
+        if name == "proof":
+            sp.add_argument("--log", required=True, help="Audit log id (one per gateway instance)")
+            sp.add_argument("--seq", required=True, type=int, help="Record number in that log")
+    sp = an_sub.add_parser("check-proof", help="Check a proof file offline (and on chain with --rpc)")
+    sp.add_argument("proof", help="Proof JSON from `fairewall anchor proof`")
+    sp.add_argument("--rpc", help="EVM JSON-RPC URL to confirm the commitment on chain")
+    p_an.set_defaults(func=cmd_anchor)
+
+    # model-armor
+    p_ma = subparsers.add_parser("model-armor", help="Set up or test Google Cloud Model Armor")
+    ma_sub = p_ma.add_subparsers(dest="ma_command", required=True)
+    p_mac = ma_sub.add_parser("create-template", help="Create a template with the filters fAIrewall reads")
+    p_mac.add_argument("--project", required=True, help="Google Cloud project ID")
+    p_mac.add_argument("--location", default="us-central1", help="Region (default: us-central1)")
+    p_mac.add_argument("--template-id", dest="template_id", default="fairewall-pi",
+                       help="Template ID (default: fairewall-pi)")
+    p_mac.add_argument("--confidence", default="MEDIUM_AND_ABOVE",
+                       choices=["LOW_AND_ABOVE", "MEDIUM_AND_ABOVE", "HIGH"],
+                       help="Injection filter confidence bar (default: MEDIUM_AND_ABOVE)")
+    p_mac.add_argument("--no-malicious-uris", dest="no_malicious_uris", action="store_true",
+                       help="Leave the malicious-URL filter off")
+    p_mas = ma_sub.add_parser("check", help="Screen one text with Model Armor and print the score")
+    p_mas.add_argument("text", help="Text to screen")
+    p_mas.add_argument("--template", help="projects/P/locations/L/templates/T (or MODEL_ARMOR_TEMPLATE)")
+    p_ma.set_defaults(func=cmd_model_armor)
 
     parsed = parser.parse_args(argv)
     if not hasattr(parsed, "func"):

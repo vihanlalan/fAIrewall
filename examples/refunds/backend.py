@@ -10,6 +10,10 @@ Configuration (environment, or examples/refunds/.env; see .env.example):
     REFUND_REVIEWER_KEY   key a finance reviewer sends to approve or reject.
     REFUND_REVIEWER_NAME  the reviewer's name recorded on decisions.
     REFUND_DATA_DIR       where the SQLite files live (default: examples/refunds/data).
+    REFUND_DATABASE_URL   a postgresql:// URL (Cloud SQL) instead; overrides REFUND_DATA_DIR.
+                          Each store gets its own schema: refund_actions, refund_runs,
+                          refund_ledger.
+    PORT                  listening port (set by Cloud Run; --port wins when given).
     REFUND_CORS_ORIGINS   comma-separated origins allowed to call the API.
 
 The agent's identity and the reviewer's identity come from this server's
@@ -39,6 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from fairewall.approvals import ApprovalError  # noqa: E402
+from fairewall.db import redact_url  # noqa: E402
 from fairewall.integrations.gemini import GeminiClient, ModelError, RecordedClient  # noqa: E402
 from fairewall.runs import AgentRunner  # noqa: E402
 from workflow import AGENT, SYSTEM_PROMPT, RefundDesk, project  # noqa: E402
@@ -85,7 +90,7 @@ def create_backend(data_dir, *, operator_keys: Dict[str, str], reviewer_keys: Di
     clients: Dict[str, Any] = {"recorded": recorded}
     if live_client is not None:
         clients["live"] = live_client
-    runner = AgentRunner(desk.store, str(Path(data_dir) / "runs.sqlite"), AGENT,
+    runner = AgentRunner(desk.store, desk.location("runs"), AGENT,
                          clients=clients, system=SYSTEM_PROMPT, project=project)
     resumed = runner.recover()           # runs a dead process left mid-step
     for run_id in resumed:
@@ -93,6 +98,7 @@ def create_backend(data_dir, *, operator_keys: Dict[str, str], reviewer_keys: Di
     review_lock = threading.Lock()
 
     app = FastAPI(title="fAIrewall refund desk", version="1.0")
+    desk.on_close.append(runner.close)
     app.state.desk, app.state.runner = desk, runner
     if cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_methods=["GET", "POST"],
@@ -252,7 +258,7 @@ def create_backend(data_dir, *, operator_keys: Dict[str, str], reviewer_keys: Di
         with desk.store.transaction() as db:
             executed = [r["id"] for r in db.execute(
                 "SELECT id FROM actions WHERE tool='refund' AND status='executed'"
-                " AND json_extract(result,'$.outcome')='refunded'")]
+                " AND %s='refunded'" % desk.store.db.json_text("result", "outcome"))]
         for action_id in executed:  # every executed refund must have its ledger row
             result = desk.store.get(action_id)["result"]
             if result.get("receipt") not in receipts:
@@ -274,8 +280,8 @@ def main() -> None:  # pragma: no cover - manual entry point
 
     load_env_file(HERE / ".env")
     parser = argparse.ArgumentParser(description="fAIrewall refund desk backend")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8090")))
     parser.add_argument("--fault", choices=["before_write", "lost_response"], default=None,
                         help="Simulate a ledger failure on refunds (reconciliation demo)")
     args = parser.parse_args()
@@ -290,12 +296,12 @@ def main() -> None:  # pragma: no cover - manual entry point
         print("[refund desk] Live Gemini off: %s Recorded runs still work." % exc)
     origins = [o.strip() for o in os.environ.get(
         "REFUND_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if o.strip()]
-    data_dir = Path(os.environ.get("REFUND_DATA_DIR", HERE / "data"))
+    data_dir = os.environ.get("REFUND_DATABASE_URL") or Path(os.environ.get("REFUND_DATA_DIR", HERE / "data"))
     app = create_backend(data_dir, operator_keys={operator: "frontend"},
                          reviewer_keys={reviewer: reviewer_name}, live_client=live,
                          fault=args.fault, cors_origins=origins)
     print("[refund desk] API docs:  http://%s:%d/docs" % (args.host, args.port))
-    print("[refund desk] Data:      %s" % data_dir)
+    print("[refund desk] Data:      %s" % redact_url(data_dir))
     print("[refund desk] Model:     %s" % (live.model if live else "recorded only"))
     if not os.environ.get("REFUND_OPERATOR_KEY"):
         print("[refund desk] Operator key (this run only): %s" % operator)

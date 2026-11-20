@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
 
 from .actions import ActionStore, canonical
+from .db import Database
 from .approvals import ApprovalError
 from .integrations.gemini import (
     ModelError, ToolCall, declarations_for, parse_turn, tool_results_content, user_content,
@@ -95,27 +94,23 @@ class AgentRunner:
         self.clients, self.system, self.project = clients, system, project
         self.max_turns, self.reconcile_text = max_turns, reconcile_text
         self.tools = declarations_for([a.definition for a in store.actions.values()])
-        with self._tx() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS runs (
+        self.db = Database(path, schema="fairewall_runs")
+        self.db.create("""
+            CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY, status TEXT NOT NULL, source TEXT NOT NULL, model TEXT,
                 scenario TEXT, session TEXT NOT NULL, message TEXT NOT NULL, history TEXT NOT NULL,
                 pending_action_id TEXT, final_text TEXT, error TEXT,
                 model_ms REAL NOT NULL DEFAULT 0, policy_ms REAL NOT NULL DEFAULT 0,
-                turns INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS run_actions (
+                turns INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS run_actions (
                 run_id TEXT NOT NULL, action_id TEXT NOT NULL, tool TEXT NOT NULL,
                 idx INTEGER NOT NULL, policy_ms REAL NOT NULL, PRIMARY KEY (run_id, action_id))""")
 
-    @contextmanager
     def _tx(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                db.execute("BEGIN IMMEDIATE")
-                yield db
-        finally:
-            db.close()
+        return self.db.transaction()
+
+    def close(self) -> None:
+        self.db.close()
 
     # --------------------------------------------------------------- public
 
@@ -301,7 +296,7 @@ class AgentRunner:
         policy_ms = max(0.0, (time.perf_counter() - started) * 1000 - self.store.last_handler_ms)
         with self._tx() as db:
             idx = db.execute("SELECT COUNT(*) FROM run_actions WHERE run_id=?", (run["id"],)).fetchone()[0]
-            cur = db.execute("INSERT OR IGNORE INTO run_actions VALUES (?,?,?,?,?)",
+            cur = db.execute("INSERT INTO run_actions VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING",
                              (run["id"], record["id"], call.name, idx, policy_ms))
             added = cur.rowcount == 1
         if added:

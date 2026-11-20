@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fAIrewall Control Plane</title>
+<style>
+  :root {
+    --bg: #0a0e16; --panel: #111827; --panel-2: #172033; --line: #243049;
+    --text: #e8edf5; --muted: #94a3b8; --blue: #5b9bff; --blue-soft: rgba(91,155,255,.14);
+    --allow: #34d399; --allow-soft: rgba(52,211,153,.14);
+    --review: #fbbf24; --review-soft: rgba(251,191,36,.14);
+    --block: #f87171; --block-soft: rgba(248,113,113,.14);
+    --mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+    --serif: Cambria, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); }
+  button, input, select, textarea { font: inherit; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 16px 32px; border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .logo { font: 700 28px/1 var(--serif); } .logo span { color: var(--blue); }
+  .sub { color: var(--muted); font-size: 14px; }
+  .login { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 32px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .login label { font-size: 13px; color: var(--muted); }
+  input[type=text], input[type=password], select, textarea { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  textarea { font-family: var(--mono); font-size: 13px; width: 100%; resize: vertical; }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  .btn:hover { border-color: var(--blue); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #08111f; font-weight: 600; }
+  .btn.danger { background: var(--block); border-color: var(--block); color: #1f0505; font-weight: 700; }
+  .btn.ok { border-color: var(--allow); color: var(--allow); }
+  .btn.small { padding: 4px 10px; font-size: 13px; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  nav { display: flex; gap: 4px; padding: 0 32px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab { background: none; border: 0; color: var(--muted); padding: 13px 14px 11px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--blue); }
+  .badge { background: var(--block); color: #1f0505; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 7px; margin-left: 6px; }
+  .kill-banner[hidden] { display: none; }
+  .kill-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; background: var(--block); color: #1f0505; padding: 12px 32px; font-weight: 600; }
+  main { padding: 26px 32px 48px; max-width: 1320px; margin: 0 auto; }
+  section[hidden] { display: none; }
+  h2 { font: 700 24px/1.2 var(--serif); margin: 0 0 4px; }
+  h3 { font-size: 15px; margin: 0 0 10px; }
+  .lead { color: var(--muted); margin: 0 0 20px; max-width: 820px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .grid { display: grid; gap: 16px; }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .g2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .big { font: 700 30px/1.15 var(--serif); margin-top: 6px; }
+  .muted { color: var(--muted); } .small { font-size: 13px; } .mono { font-family: var(--mono); font-size: 13px; }
+  .alert { border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 14px; }
+  .alert.warn { background: var(--review-soft); border: 1px solid var(--review); }
+  .alert.bad { background: var(--block-soft); border: 1px solid var(--block); }
+  .alert.good { background: var(--allow-soft); border: 1px solid var(--allow); }
+  .alert.info { background: var(--blue-soft); border: 1px solid var(--blue); }
+  .pill { display: inline-block; font-weight: 700; font-size: 11px; letter-spacing: .08em; border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+  .pill.allow, .pill.good { background: var(--allow); color: #04140d; }
+  .pill.review, .pill.flag, .pill.warn { background: var(--review); color: #1a1300; }
+  .pill.block, .pill.bad { background: var(--block); color: #1f0505; }
+  .pill.info { background: var(--blue-soft); color: var(--blue); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .why { color: var(--muted); font-size: 13px; }
+  .score { display: inline-flex; align-items: center; gap: 8px; }
+  .bar { width: 70px; height: 7px; background: var(--panel-2); border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; }
+  .row-form { display: grid; grid-template-columns: 140px 1fr; gap: 10px 14px; align-items: center; margin-bottom: 12px; }
+  .row-form label { font-size: 13px; color: var(--muted); }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .empty { color: var(--muted); padding: 28px 18px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; }
+  pre.snip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font: 13px/1.5 var(--mono); margin: 8px 0 0; white-space: pre; }
+  ul.issues { margin: 0; padding-left: 18px; } ul.issues li { margin: 4px 0; }
+  .env-card .big { font-size: 22px; }
+  .changed td { background: var(--review-soft); }
+  .looser td { background: var(--block-soft); }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; padding: 0 32px 28px; }
+  @media (max-width: 900px) {
+    header, nav, main, .login, .kill-banner { padding-left: 16px; padding-right: 16px; }
+    .g2 { grid-template-columns: 1fr; } .row-form { grid-template-columns: 1fr; }
+    table { display: block; overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo">f<span>AI</span>rewall</div><div class="sub">Control plane</div></div>
+  <div class="small muted" id="hdr"></div>
+</header>
+<div class="login" id="login">
+  <label for="admin-key">Admin key</label>
+  <input type="password" id="admin-key" placeholder="FAIREWALL_ADMIN_KEY" autocomplete="off" style="width:240px">
+  <label for="me">Your name</label>
+  <input type="text" id="me" placeholder="shown in the change history" style="width:180px">
+  <button class="btn primary" id="connect">Connect</button>
+  <span class="small" id="login-status"></span>
+</div>
+<nav role="tablist">
+  <button class="tab" role="tab" data-tab="fleet" aria-selected="true">Fleet</button>
+  <button class="tab" role="tab" data-tab="policies" aria-selected="false">Policies</button>
+  <button class="tab" role="tab" data-tab="alerts" aria-selected="false">Alerts</button>
+  <button class="tab" role="tab" data-tab="kill" aria-selected="false">Kill switch<span class="badge" id="kill-badge" hidden>ON</span></button>
+  <button class="tab" role="tab" data-tab="activity" aria-selected="false">Change history</button>
+  <button class="tab" role="tab" data-tab="add" aria-selected="false">Add a gateway</button>
+</nav>
+<div class="kill-banner" id="kill-banner" role="alert" hidden><span id="kill-banner-text"></span><button class="btn small" id="kill-go" style="background:#1f0505;color:#fff">Manage</button></div>
+
+<main>
+  <!-- ============================================================ FLEET -->
+  <section id="tab-fleet">
+    <h2>Fleet health</h2>
+    <p class="lead">Every gateway reports in every 10 seconds. The score is out of 100 and built from checks you can see: online (40), running its assigned policy (25), audit chain intact (15), API key set (10), separate reviewer key (10).</p>
+    <div id="fleet-issues"></div>
+    <div class="grid g4" id="fleet-cards"></div>
+    <h3 style="margin-top:24px">Environments</h3>
+    <div class="grid g3" id="env-cards"></div>
+    <h3 style="margin-top:24px">Gateways</h3>
+    <div class="card" id="gw-table"><div class="empty">Connect with your admin key.</div></div>
+  </section>
+
+  <!-- ========================================================= POLICIES -->
+  <section id="tab-policies" hidden>
+    <h2>Policies</h2>
+    <p class="lead">Every save makes a new numbered version; nothing changes on any gateway until you deploy it. Preview a change against real recent traffic, deploy to staging in shadow mode, then promote. To roll back, deploy the earlier version.</p>
+    <div class="grid g2">
+      <div class="card">
+        <h3>Versions</h3>
+        <div id="versions"><div class="empty">No versions yet. Write one on the right.</div></div>
+      </div>
+      <div class="card">
+        <h3 id="editor-title">New version</h3>
+        <div class="row-form">
+          <label for="p-name">Policy name</label><input type="text" id="p-name" value="default">
+          <label for="p-note">What changed</label><input type="text" id="p-note" placeholder="e.g. lower refund cap to 300">
+          <label for="p-base">Compare with</label><select id="p-base"><option value="">(none yet)</option></select>
+        </div>
+        <textarea id="p-body" rows="16" spellcheck="false"></textarea>
+        <div class="toolbar" style="margin-top:10px">
+          <button class="btn" id="p-preview">Preview impact</button>
+          <button class="btn primary" id="p-save">Save as new version</button>
+          <span class="small muted" id="p-msg"></span>
+        </div>
+      </div>
+    </div>
+    <div id="compare-out" style="margin-top:16px"></div>
+  </section>
+
+  <!-- =========================================================== ALERTS -->
+  <section id="tab-alerts" hidden>
+    <h2>Alerts</h2>
+    <p class="lead">Blocked and held calls from every gateway, newest first. Refreshes every 5 seconds.</p>
+    <div class="toolbar">
+      <select id="al-kind"><option value="block,flag">Blocked and review</option><option value="block">Blocked only</option><option value="flag">Review only</option><option value="">Everything</option></select>
+      <select id="al-gw"><option value="">All gateways</option></select>
+      <span class="small muted" id="al-meta"></span>
+    </div>
+    <div class="card" id="al-out"><div class="empty">Connect with your admin key.</div></div>
+  </section>
+
+  <!-- ====================================================== KILL SWITCH -->
+  <section id="tab-kill" hidden>
+    <h2>Fleet kill switch</h2>
+    <p class="lead">Stops agents on every gateway. Each gateway applies it on its next sync, within about 10 seconds, and keeps it until you release it here. Gateways that cannot reach the control plane keep what they last received.</p>
+    <div class="grid g2">
+      <div class="card" style="border-color:var(--block)">
+        <h3>Stop agents</h3>
+        <div class="row-form">
+          <label for="k-scope">Stop</label>
+          <select id="k-scope"><option value="all">Every agent on every gateway</option><option value="principal">One agent identity, everywhere</option><option value="session">One session (one run)</option></select>
+          <label for="k-target" id="k-target-l" hidden>Agent or session id</label><input type="text" id="k-target" hidden placeholder="e.g. billing-bot">
+          <label for="k-reason">Reason</label><input type="text" id="k-reason" placeholder="e.g. incident 42: duplicate refunds">
+        </div>
+        <button class="btn danger" id="k-freeze">Stop agents now</button> <span class="small muted" id="k-msg"></span>
+      </div>
+      <div class="card"><h3>Active</h3><div id="k-list"></div></div>
+    </div>
+  </section>
+
+  <!-- ========================================================= ACTIVITY -->
+  <section id="tab-activity" hidden>
+    <h2>Change history</h2>
+    <p class="lead">Who changed what: new versions, deployments, promotions, gateways added or removed, freezes.</p>
+    <div class="card" id="act-out"></div>
+  </section>
+
+  <!-- ============================================================== ADD -->
+  <section id="tab-add" hidden>
+    <h2>Add a gateway</h2>
+    <p class="lead">Register a gateway, then start it with the token shown. The token identifies the gateway and is shown once; the control plane keeps only its hash.</p>
+    <div class="grid g2">
+      <div class="card">
+        <div class="row-form">
+          <label for="g-name">Gateway name</label><input type="text" id="g-name" placeholder="e.g. mumbai-prod-1">
+          <label for="g-env">Environment</label><input type="text" id="g-env" value="production" list="env-list">
+        </div>
+        <datalist id="env-list"><option value="staging"><option value="production"></datalist>
+        <button class="btn primary" id="g-add">Register</button> <span class="small muted" id="g-msg"></span>
+        <div id="g-out"></div>
+      </div>
+      <div class="card"><h3>Registered gateways</h3><div id="g-list"></div></div>
+    </div>
+  </section>
+</main>
+<footer>fAIrewall control plane. Your admin key stays in this browser tab (session storage) and is sent only to this server.</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var ORIGIN = location.origin, state = { versions: [], envs: [], gateways: [] }, alertTimer = null, fleetTimer = null;
+  function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function store(k, v) { try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch (e) {} }
+  function load(k) { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } }
+  function val(id) { var el = $(id); return el ? el.value.trim() : ""; }
+  function api(path, opts) {
+    opts = opts || {};
+    var h = { "Content-Type": "application/json", "X-Actor": val("me") || "admin" };
+    if (val("admin-key")) h["X-API-Key"] = val("admin-key");
+    return fetch(path, { method: opts.method || "GET", headers: h, body: opts.body ? JSON.stringify(opts.body) : undefined }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) { var e = new Error(typeof j.detail === "string" ? j.detail : (r.status + " " + r.statusText)); e.status = r.status; throw e; }
+        return j;
+      });
+    });
+  }
+  function ago(t) { if (!t) return "never"; var s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : s < 86400 ? Math.round(s / 3600) + "h ago" : new Date(t * 1000).toLocaleDateString(); }
+  function when(t) { return t ? new Date(t * 1000).toLocaleString() : ""; }
+  function verdict(a) { return a === "flag" ? "review" : a; }
+  function pill(cls, text) { return '<span class="pill ' + esc(cls) + '">' + esc(String(text).toUpperCase()) + "</span>"; }
+  function scoreColor(s) { return s >= 90 ? "var(--allow)" : s >= 60 ? "var(--review)" : "var(--block)"; }
+  function fail(el, e) { el.innerHTML = '<div class="alert bad">' + esc(e.message) + (e.status === 401 ? " Enter the admin key above." : "") + "</div>"; }
+
+  // ---------------------------------------------------------------- tabs
+  var loaders = {};
+  function show(name) {
+    document.querySelectorAll(".tab").forEach(function (t) { t.setAttribute("aria-selected", t.dataset.tab === name ? "true" : "false"); });
+    document.querySelectorAll("main section").forEach(function (s) { s.hidden = s.id !== "tab-" + name; });
+    history.replaceState(null, "", "#" + name);
+    if (loaders[name]) loaders[name]();
+  }
+  document.querySelectorAll(".tab").forEach(function (t) { t.addEventListener("click", function () { show(t.dataset.tab); }); });
+
+  function killBanner(freezes) {
+    var on = freezes && freezes.length;
+    $("kill-badge").hidden = !on; $("kill-banner").hidden = !on;
+    if (on) {
+      var f = freezes[0];
+      $("kill-banner-text").textContent = "Fleet kill switch is ON for " + (f.scope === "all" ? "every agent" : f.scope + " " + f.target) +
+        (freezes.length > 1 ? " (+" + (freezes.length - 1) + " more)" : "") + ", by " + f.by + ". Gateways block calls in scope.";
+    }
+  }
+  $("kill-go").addEventListener("click", function () { show("kill"); });
+
+  // --------------------------------------------------------------- fleet
+  loaders.fleet = function () {
+    clearInterval(fleetTimer);
+    var tick = function () {
+      if ($("tab-fleet").hidden) return;
+      api("/cp/v1/overview").then(function (o) {
+        state.gateways = o.gateways; state.envs = o.environments; killBanner(o.freezes);
+        $("fleet-issues").innerHTML = !o.gateways.length ? '<div class="alert info">No gateways yet. Use <b>Add a gateway</b> to connect the first one.</div>' :
+          o.issues.length ? '<div class="alert warn"><b>Needs attention</b><ul class="issues">' + o.issues.map(function (i) { return "<li>" + esc(i) + "</li>"; }).join("") + "</ul></div>" :
+          '<div class="alert good">All gateways are online, on their assigned policy, with intact audit chains.</div>';
+        var online = o.gateways.filter(function (g) { return g.health.online; }).length;
+        var cards = [
+          ["Fleet health", o.fleet_score == null ? "—" : o.fleet_score + "/100", "Average of gateway scores"],
+          ["Gateways online", online + " of " + o.gateways.length, o.gateways.length - online ? (o.gateways.length - online) + " not reporting" : "All reporting"],
+          ["Blocked, last hour", o.last_hour.block, o.last_hour.review + " sent for review"],
+          ["Allowed, last hour", o.last_hour.allow, "Tool calls that went through"]
+        ];
+        $("fleet-cards").innerHTML = cards.map(function (c, i) {
+          var style = i === 0 && o.fleet_score != null ? ' style="color:' + scoreColor(o.fleet_score) + '"' : "";
+          return '<div class="card"><div class="label">' + esc(c[0]) + '</div><div class="big"' + style + ">" + esc(c[1]) + '</div><div class="small muted">' + esc(c[2]) + "</div></div>";
+        }).join("");
+        $("env-cards").innerHTML = o.environments.length ? o.environments.map(envCard).join("") : '<div class="empty">Environments appear when you register a gateway or deploy a policy.</div>';
+        bindEnvButtons();
+        if (!o.gateways.length) { $("gw-table").innerHTML = '<div class="empty">No gateways registered.</div>'; return; }
+        $("gw-table").innerHTML = "<table><tr><th>Gateway</th><th>Environment</th><th>Health</th><th>What to look at</th><th>Running</th><th>Last seen</th><th class=\"num\">Last hour</th></tr>" +
+          o.gateways.map(function (g) {
+            var h = g.health, r = g.report || {};
+            var running = r.fingerprint ? '<span class="mono">' + esc(r.fingerprint.slice(0, 8)) + "</span>" + (r.shadow ? " " + pill("warn", "shadow") : "") : '<span class="muted">—</span>';
+            var lh = g.last_hour || {};
+            return "<tr><td><b>" + esc(g.name) + '</b><div class="small muted mono">' + esc(g.id) + "</div>" + (h.frozen ? pill("bad", "frozen") : "") + "</td><td>" + esc(g.environment) +
+              '</td><td><span class="score"><span class="bar"><i style="width:' + h.score + "%;background:" + scoreColor(h.score) + '"></i></span><b>' + h.score + "</b></span></td>" +
+              '<td class="why">' + (h.issues.length ? h.issues.map(esc).join("<br>") : '<span style="color:var(--allow)">Nothing</span>') + "</td><td>" + running +
+              '</td><td class="small">' + esc(ago(g.last_seen)) + '</td><td class="num small">' + (lh.block || 0) + " blocked<br>" + (lh.flag || 0) + " review<br>" + (lh.allow || 0) + " allowed</td></tr>";
+          }).join("") + "</table>";
+      }).catch(function (e) { fail($("gw-table"), e); });
+    };
+    tick(); fleetTimer = setInterval(tick, 5000);
+  };
+  function envCard(e) {
+    var gws = state.gateways.filter(function (g) { return g.environment === e.name; }).length;
+    var body = e.policy ? '<div class="big">' + esc(e.policy) + " v" + esc(e.version) + "</div>" + '<div class="small muted mono">' + esc((e.fingerprint || "").slice(0, 16)) + "</div>" +
+      '<div class="small" style="margin-top:6px">' + (e.shadow ? pill("warn", "shadow: logs, blocks nothing") : pill("good", "enforcing")) + "</div>" +
+      '<div class="small muted" style="margin-top:6px">Deployed by ' + esc(e.updated_by) + " · " + esc(ago(e.updated_at)) + "</div>"
+      : '<div class="big muted">No policy</div><div class="small muted">Gateways here run their local policy.</div>';
+    var actions = "";
+    if (e.name === "production" && state.envs.some(function (x) { return x.name === "staging" && x.policy; })) {
+      actions += '<button class="btn small" data-promote="production">Promote staging here</button> ';
+    }
+    if (e.policy && e.shadow) actions += '<button class="btn small ok" data-enforce="' + esc(e.name) + '">Switch to enforcing</button>';
+    return '<div class="card env-card"><div class="label">' + esc(e.name) + " · " + gws + " gateway" + (gws === 1 ? "" : "s") + "</div>" + body + (actions ? '<div class="toolbar" style="margin:12px 0 0">' + actions + "</div>" : "") + "</div>";
+  }
+  function bindEnvButtons() {
+    document.querySelectorAll("[data-promote]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var st = state.envs.filter(function (x) { return x.name === "staging"; })[0];
+        if (!confirm("Deploy " + st.policy + " v" + st.version + " (what staging runs) to production, enforcing?")) return;
+        api("/cp/v1/environments/production/promote", { method: "POST", body: { source: "staging", shadow: false } }).then(loaders.fleet).catch(function (e) { alert(e.message); });
+      });
+    });
+    document.querySelectorAll("[data-enforce]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var e = state.envs.filter(function (x) { return x.name === b.dataset.enforce; })[0];
+        if (!confirm("Turn on enforcement in " + e.name + "? Calls the policy forbids will start being blocked.")) return;
+        api("/cp/v1/environments/" + encodeURIComponent(e.name) + "/deploy", { method: "POST", body: { policy: e.policy, version: e.version, shadow: false } }).then(loaders.fleet).catch(function (x) { alert(x.message); });
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ policies
+  var DEFAULT_POLICY = {
+    version: "1", max_spend_per_transaction: 500, max_spend_per_session: 2000, max_calls_per_minute: 60,
+    allowed_egress_domains: [], output_pii_redaction: ["email", "phone", "aadhaar", "pan", "card", "ssn"],
+    tools: { process_refund: { max_values: { amount: 400 }, require_human_approval: false },
+             send_email: { forbid_when_tainted: true },
+             web_search: { produces_untrusted_output: true, risk_tier: "low" } }
+  };
+  loaders.policies = function () {
+    api("/cp/v1/policies").then(function (d) {
+      state.versions = d.versions; state.envs = d.environments;
+      var deployedIn = function (v) { return d.environments.filter(function (e) { return e.policy === v.name && e.version === v.version; }); };
+      $("p-base").innerHTML = d.versions.length ? d.versions.map(function (v) { return '<option value="' + esc(v.name + "@" + v.version) + '">' + esc(v.name + " v" + v.version) + "</option>"; }).join("") : '<option value="">(none yet)</option>';
+      var prod = d.environments.filter(function (e) { return e.name === "production" && e.policy; })[0];
+      if (prod) $("p-base").value = prod.policy + "@" + prod.version;
+      if (!$("p-body").value) $("p-body").value = JSON.stringify(DEFAULT_POLICY, null, 2);
+      if (!d.versions.length) { $("versions").innerHTML = '<div class="empty">No versions yet. The editor holds a starter policy: adjust it and press <b>Save as new version</b>.</div>'; return; }
+      $("versions").innerHTML = "<table><tr><th>Version</th><th>Note</th><th>Live in</th><th></th></tr>" + d.versions.map(function (v) {
+        var live = deployedIn(v).map(function (e) { return pill(e.shadow ? "warn" : "good", e.name + (e.shadow ? " (shadow)" : "")); }).join(" ");
+        return "<tr><td><b>" + esc(v.name) + " v" + esc(v.version) + '</b><div class="small muted mono">' + esc(v.fingerprint.slice(0, 12)) + "</div></td><td class=\"why\">" + esc(v.note || "—") +
+          "<br>" + esc(v.created_by) + " · " + esc(ago(v.created_at)) + "</td><td>" + (live || '<span class="muted small">not deployed</span>') + "</td><td style=\"white-space:nowrap\">" +
+          '<button class="btn small" data-load="' + esc(v.name + "@" + v.version) + '">Edit copy</button> <button class="btn small primary" data-deploy="' + esc(v.name + "@" + v.version) + '">Deploy…</button></td></tr>';
+      }).join("") + "</table>";
+      document.querySelectorAll("[data-load]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          var p = b.dataset.load.split("@");
+          api("/cp/v1/policies/" + encodeURIComponent(p[0]) + "/" + p[1]).then(function (v) {
+            $("p-name").value = v.name; $("p-body").value = JSON.stringify(v.body, null, 2); $("p-base").value = b.dataset.load;
+            $("editor-title").textContent = "New version, starting from " + v.name + " v" + v.version; $("p-msg").textContent = "";
+          });
+        });
+      });
+      document.querySelectorAll("[data-deploy]").forEach(function (b) { b.addEventListener("click", function () { deployDialog(b.dataset.deploy); }); });
+    }).catch(function (e) { fail($("versions"), e); });
+  };
+  function deployDialog(ref) {
+    var p = ref.split("@");
+    var env = prompt("Deploy " + p[0] + " v" + p[1] + " to which environment?\n(e.g. staging or production)", "staging");
+    if (!env) return;
+    var shadow = confirm("Run it in SHADOW mode first?\n\nOK = shadow: gateways log what they would block, but block nothing.\nCancel = enforce now.");
+    api("/cp/v1/environments/" + encodeURIComponent(env.trim()) + "/deploy", { method: "POST", body: { policy: p[0], version: +p[1], shadow: shadow } })
+      .then(function () { $("p-msg").textContent = "Deployed to " + env + (shadow ? " in shadow mode" : "") + ". Gateways pick it up within 10 s."; loaders.policies(); })
+      .catch(function (e) { alert(e.message); });
+  }
+  function parseBody() {
+    try { return JSON.parse($("p-body").value); } catch (e) { $("p-msg").innerHTML = '<span style="color:var(--block)">Not valid JSON: ' + esc(e.message) + "</span>"; return null; }
+  }
+  $("p-save").addEventListener("click", function () {
+    var body = parseBody(); if (!body) return;
+    api("/cp/v1/policies", { method: "POST", body: { name: val("p-name"), body: body, note: val("p-note") } }).then(function (v) {
+      $("p-msg").innerHTML = '<span style="color:var(--allow)">Saved as ' + esc(v.name) + " v" + esc(v.version) + ". Not live anywhere until you deploy it.</span>";
+      $("p-note").value = ""; loaders.policies();
+    }).catch(function (e) { $("p-msg").innerHTML = '<span style="color:var(--block)">' + esc(e.message) + "</span>"; });
+  });
+  $("p-preview").addEventListener("click", function () {
+    var body = parseBody(); if (!body) return;
+    var base = val("p-base");
+    if (!base) { $("p-msg").textContent = "Save a first version, then preview later changes against it."; return; }
+    var b = base.split("@");
+    $("compare-out").innerHTML = '<div class="card muted">Replaying recent traffic…</div>';
+    api("/cp/v1/policies/compare", { method: "POST", body: { base: { name: b[0], version: +b[1] }, draft: body } }).then(renderCompare)
+      .catch(function (e) { fail($("compare-out"), e); });
+  });
+  function renderCompare(c) {
+    var r = c.replay, name = val("p-base").replace("@", " v");
+    var head = r.looser ? '<div class="alert bad"><b>' + r.looser + " call" + (r.looser === 1 ? "" : "s") + " would now get through that " + name + " stopped.</b> Read these before deploying.</div>" :
+      r.stricter ? '<div class="alert warn">' + r.stricter + " call" + (r.stricter === 1 ? "" : "s") + " would now be stopped or sent for review. Nothing gets looser.</div>" :
+      c.events_replayed ? '<div class="alert good">No verdict changes on ' + c.events_replayed + " recent calls.</div>" : '<div class="alert info">No traffic to replay yet. Settings changes are listed below.</div>';
+    var settings = c.settings.length ? "<table><tr><th>Setting</th><th>Before</th><th>After</th></tr>" + c.settings.map(function (s) {
+      return "<tr><td class=\"mono\">" + esc(s.path) + "</td><td class=\"mono small\">" + esc(JSON.stringify(s.before)) + "</td><td class=\"mono small\">" + esc(JSON.stringify(s.after)) + "</td></tr>";
+    }).join("") + "</table>" : '<p class="small muted">No settings differ.</p>';
+    var ex = r.examples.length ? "<table><tr><th>Tool</th><th>Arguments</th><th>Before</th><th>After</th><th>Why</th></tr>" + r.examples.map(function (x) {
+      return '<tr class="' + x.direction + '"><td class="mono">' + esc(x.tool) + '</td><td class="mono small">' + esc(JSON.stringify(x.arguments)) + "</td><td>" + esc(x.old.replace("_", " ")) + "</td><td><b>" + esc(x.new.replace("_", " ")) +
+        '</b></td><td class="why">' + esc(x.rules_added.concat(x.rules_removed.map(function (q) { return "no longer: " + q; })).join(", ")) + "</td></tr>";
+    }).join("") + "</table>" : "";
+    $("compare-out").innerHTML = '<div class="card"><h3>Impact of this change, against ' + esc(name) + "</h3>" + head +
+      '<div class="grid g4" style="margin-bottom:14px">' + [["Calls replayed", c.events_replayed], ["Verdicts changed", r.changed], ["Now looser", r.looser], ["Now stricter", r.stricter]].map(function (k) {
+        return '<div><div class="label">' + k[0] + '</div><div class="big">' + k[1] + "</div></div>";
+      }).join("") + '</div><div class="label" style="margin:6px 0">Settings</div>' + settings + (ex ? '<div class="label" style="margin:16px 0 6px">Calls whose verdict changes</div>' + ex : "") +
+      '<p class="small muted" style="margin-top:12px">Replayed from decisions gateways reported (' + esc(c.replayed_from) + "). Arguments are as the gateways logged them, with secret-looking fields masked, so this is a close estimate.</p></div>";
+  }
+
+  // -------------------------------------------------------------- alerts
+  loaders.alerts = function () {
+    clearInterval(alertTimer);
+    var gwSel = $("al-gw"), keep = gwSel.value;
+    api("/cp/v1/gateways").then(function (d) {
+      gwSel.innerHTML = '<option value="">All gateways</option>' + d.gateways.map(function (g) { return '<option value="' + esc(g.id) + '">' + esc(g.name) + "</option>"; }).join("");
+      gwSel.value = keep;
+    }).catch(function () {});
+    var tick = function () {
+      if ($("tab-alerts").hidden) return;
+      var q = "/cp/v1/events?limit=200" + (val("al-kind") ? "&actions=" + encodeURIComponent(val("al-kind")) : "") + (val("al-gw") ? "&gateway=" + encodeURIComponent(val("al-gw")) : "");
+      api(q).then(function (d) {
+        $("al-meta").textContent = d.events.length + " shown";
+        if (!d.events.length) { $("al-out").innerHTML = '<div class="empty">Nothing here yet. Blocked and held calls from any gateway will appear within 10 seconds.</div>'; return; }
+        $("al-out").innerHTML = "<table><tr><th>When</th><th>Gateway</th><th>Tool</th><th>Verdict</th><th>Why</th><th>Session</th><th>Agent</th></tr>" + d.events.map(function (e) {
+          var f = (e.findings || []).filter(function (x) { return x.action !== "allow"; })[0];
+          return '<tr><td class="small">' + esc(new Date((e.timestamp || e.received_at) * 1000).toLocaleString()) + "</td><td>" + esc(e.gateway || e.gateway_id) + '<div class="small muted">' + esc(e.environment || "") + '</div></td><td class="mono">' + esc(e.tool) +
+            "</td><td>" + (e.action ? pill(verdict(e.action), verdict(e.action)) : "") + '</td><td class="why">' + esc(f ? f.message : "") + '</td><td class="mono small">' + esc(e.session_id) + '</td><td class="small">' + esc(e.principal) + "</td></tr>";
+        }).join("") + "</table>";
+      }).catch(function (e) { fail($("al-out"), e); });
+    };
+    tick(); alertTimer = setInterval(tick, 5000);
+  };
+  $("al-kind").addEventListener("change", function () { loaders.alerts(); });
+  $("al-gw").addEventListener("change", function () { loaders.alerts(); });
+
+  // --------------------------------------------------------- kill switch
+  loaders.kill = function () {
+    api("/cp/v1/killswitch").then(function (d) {
+      killBanner(d.freezes);
+      $("k-list").innerHTML = d.freezes.length ? d.freezes.map(function (f) {
+        return '<div class="toolbar" style="justify-content:space-between;border-top:1px solid var(--line);padding-top:10px">' + "<div>" + pill("bad", "stopped") + " <b>" + esc(f.scope === "all" ? "every agent" : f.scope + " " + f.target) +
+          '</b><div class="small muted">' + esc(f.reason) + " · by " + esc(f.by) + " · " + esc(when(f.at)) + '</div></div><button class="btn small ok" data-scope="' + esc(f.scope) + '" data-target="' + esc(f.target) + '">Release</button></div>';
+      }).join("") : '<p class="small" style="color:var(--allow)">Off. Agents run normally on every gateway.</p>';
+      $("k-list").querySelectorAll("[data-scope]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          if (!confirm("Release this freeze on every gateway?")) return;
+          api("/cp/v1/killswitch/unfreeze", { method: "POST", body: { scope: b.dataset.scope, target: b.dataset.target } }).then(loaders.kill).catch(function (e) { alert(e.message); });
+        });
+      });
+    }).catch(function (e) { fail($("k-list"), e); });
+  };
+  $("k-scope").addEventListener("change", function () { var all = val("k-scope") === "all"; $("k-target").hidden = all; $("k-target-l").hidden = all; });
+  $("k-freeze").addEventListener("click", function () {
+    var scope = val("k-scope"), target = val("k-target");
+    if (scope !== "all" && !target) { $("k-msg").textContent = "Enter the agent or session id."; return; }
+    if (!confirm("Stop " + (scope === "all" ? "EVERY agent on EVERY gateway" : scope + " " + target + " everywhere") + "?")) return;
+    api("/cp/v1/killswitch/freeze", { method: "POST", body: { scope: scope, target: target || null, reason: val("k-reason") } })
+      .then(function () { $("k-msg").textContent = "Sent. Gateways apply it within about 10 seconds."; loaders.kill(); }).catch(function (e) { $("k-msg").textContent = e.message; });
+  });
+
+  // ------------------------------------------------------------ activity
+  var ACTIONS = { policy_version_created: "Saved policy version", deployed: "Deployed", gateway_registered: "Registered gateway", gateway_removed: "Removed gateway", fleet_freeze: "Kill switch ON", fleet_unfreeze: "Kill switch released" };
+  function describe(c) {
+    var d = c.detail || {};
+    switch (c.action) {
+      case "policy_version_created": return d.policy + " v" + d.version + (d.note ? ": " + d.note : "");
+      case "deployed": return d.policy + " v" + d.version + " → " + d.environment + (d.shadow ? " (shadow)" : "") + (d.previous ? ", replacing " + d.previous.policy + " v" + d.previous.version : "");
+      case "gateway_registered": return d.name + " (" + d.environment + ")";
+      case "gateway_removed": return d.gateway;
+      case "fleet_freeze": return (d.scope === "all" ? "every agent" : d.scope + " " + d.target) + ": " + d.reason;
+      case "fleet_unfreeze": return d.scope === "all" ? "every agent" : d.scope + " " + d.target;
+      default: return JSON.stringify(d);
+    }
+  }
+  loaders.activity = function () {
+    api("/cp/v1/changes?limit=200").then(function (d) {
+      $("act-out").innerHTML = d.changes.length ? "<table><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr>" + d.changes.map(function (c) {
+        return '<tr><td class="small">' + esc(when(c.at)) + "</td><td>" + esc(c.actor) + "</td><td>" + esc(ACTIONS[c.action] || c.action) + '</td><td class="why">' + esc(describe(c)) + "</td></tr>";
+      }).join("") + "</table>" : '<div class="empty">No changes yet.</div>';
+    }).catch(function (e) { fail($("act-out"), e); });
+  };
+
+  // ------------------------------------------------------------ gateways
+  loaders.add = function () {
+    api("/cp/v1/gateways").then(function (d) {
+      $("g-list").innerHTML = d.gateways.length ? "<table><tr><th>Name</th><th>Environment</th><th>Last seen</th><th></th></tr>" + d.gateways.map(function (g) {
+        return "<tr><td><b>" + esc(g.name) + '</b><div class="small muted mono">' + esc(g.id) + "</div></td><td>" + esc(g.environment) + '</td><td class="small">' + esc(ago(g.last_seen)) +
+          '</td><td><button class="btn small" data-rm="' + esc(g.id) + '" data-name="' + esc(g.name) + '">Remove</button></td></tr>';
+      }).join("") + "</table>" : '<div class="empty">None yet.</div>';
+      $("g-list").querySelectorAll("[data-rm]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          if (!confirm("Remove " + b.dataset.name + "? Its token stops working; the gateway keeps enforcing its last policy on its own.")) return;
+          api("/cp/v1/gateways/" + b.dataset.rm, { method: "DELETE" }).then(loaders.add).catch(function (e) { alert(e.message); });
+        });
+      });
+    }).catch(function (e) { fail($("g-list"), e); });
+  };
+  $("g-add").addEventListener("click", function () {
+    api("/cp/v1/gateways", { method: "POST", body: { name: val("g-name"), environment: val("g-env") || "production" } }).then(function (r) {
+      $("g-msg").textContent = "";
+      $("g-out").innerHTML = '<div class="alert warn" style="margin-top:14px"><b>Copy this token now.</b> It is not shown again.</div><pre class="snip">' + esc(r.token) + "</pre>" +
+        '<div class="label" style="margin-top:14px">Start the gateway</div><pre class="snip">' + esc(
+          "fairewall serve --host 0.0.0.0 --port 8000 \\\n  --api-key $FAIREWALL_API_KEY --reviewer-key $FAIREWALL_REVIEWER_KEY \\\n  --control-plane " + ORIGIN + " \\\n  --gateway-token " + r.token) + "</pre>" +
+        '<p class="small muted">Or set FAIREWALL_CONTROL_PLANE_URL and FAIREWALL_GATEWAY_TOKEN. It appears under Fleet within 10 seconds of starting. Until a policy is deployed to <b>' + esc(r.gateway.environment) + "</b>, it runs its local policy.</p>";
+      $("g-name").value = ""; loaders.add();
+    }).catch(function (e) { $("g-msg").innerHTML = '<span style="color:var(--block)">' + esc(e.message) + "</span>"; });
+  });
+
+  // -------------------------------------------------------------- login
+  $("connect").addEventListener("click", function () {
+    store("cp-key", val("admin-key")); store("cp-me", val("me"));
+    api("/cp/v1/overview").then(function () {
+      $("login-status").innerHTML = '<span style="color:var(--allow)">Connected</span>';
+      show(document.querySelector('.tab[aria-selected="true"]').dataset.tab);
+    }).catch(function (e) { $("login-status").innerHTML = '<span style="color:var(--block)">' + esc(e.status === 401 ? "Wrong key" : e.message) + "</span>"; });
+  });
+  $("admin-key").addEventListener("keydown", function (e) { if (e.key === "Enter") $("connect").click(); });
+  $("admin-key").value = load("cp-key"); $("me").value = load("cp-me");
+  api("/cp/v1/info").then(function (i) {
+    $("hdr").textContent = "Gateways sync every " + i.poll_seconds + " s";
+    if (!i.auth_required) {
+      $("login").innerHTML = '<span class="small" style="color:var(--review)">No admin key is set on this control plane, so anyone who can reach it can change policy. Start it with --admin-key before exposing it.</span>' +
+        '<label for="me" style="margin-left:auto">Your name</label><input type="text" id="me" style="width:180px" placeholder="shown in the change history">';
+      $("me").value = load("cp-me"); $("me").addEventListener("change", function () { store("cp-me", val("me")); });
+    }
+    var start = location.hash.replace("#", "");
+    show(document.querySelector('.tab[data-tab="' + start + '"]') ? start : "fleet");
+  });
+})();
+</script>
+</body>
+</html>

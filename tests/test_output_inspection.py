@@ -45,8 +45,11 @@ def test_bulk_personal_data_is_flagged_not_blocked():
     fw = _fw()
     emails = " ".join("user%d@example.com" % i for i in range(30))
     d, out = fw.inspect_output("get_record", emails, ctx=fw.session("s"))
-    assert out == emails and d.allowed
+    # The call already ran, so nothing blocks; the dump is flagged as bulk and
+    # each address is redacted before the agent reads it.
+    assert d.allowed and not d.blocked
     assert any(f.rule_id == "output.bulk_pii" for f in d.findings)
+    assert "@" not in out and out.count("[REDACTED:email]") == 30
 
 
 def test_bulk_email_exfiltration_in_a_tool_call_is_blocked():

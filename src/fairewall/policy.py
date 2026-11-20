@@ -56,6 +56,9 @@ class ToolPolicy:
     # "low" or "high". Decides whether the detector tier inspects every call to
     # this tool. None = inferred from the other constraints (see Policy.risk_tier).
     risk_tier: Optional[str] = None
+    # Personal-data types this tool may return unredacted, e.g. ["email", "phone"]
+    # for a customer lookup whose result the agent needs in order to reply.
+    output_pii_allowed: List[str] = field(default_factory=list)
 
     review_above: Optional[float] = None
 
@@ -67,9 +70,19 @@ class ToolPolicy:
                 f"Tool {self.name!r}: risk_tier must be one of {RISK_TIERS} or None, "
                 f"got {self.risk_tier!r}"
             )
+        _check_pii_types(self.output_pii_allowed, f"Tool {self.name!r}: output_pii_allowed")
 
 
 RISK_TIERS = ("low", "high")
+
+# Personal-data types fAIrewall can find and redact in tool output.
+PII_TYPES = ("email", "phone", "aadhaar", "pan", "card", "ssn")
+
+
+def _check_pii_types(values: List[str], where: str) -> None:
+    bad = [v for v in values or [] if v not in PII_TYPES]
+    if bad:
+        raise ValueError(f"{where}: unknown PII types {bad}; choose from {list(PII_TYPES)}")
 
 
 DEFAULT_SPEND_SCALES: Dict[str, float] = {
@@ -103,8 +116,12 @@ class Policy:
     # fingerprinted policy so an auditor can see how sensitive the ML tier was.
     detector_flag_threshold: float = 0.5
     detector_block_threshold: float = 0.85
+    # Personal-data types redacted from tool output before the agent (and the
+    # model provider behind it) sees them. [] turns single-item redaction off.
+    output_pii_redaction: List[str] = field(default_factory=lambda: list(PII_TYPES))
 
     def __post_init__(self) -> None:
+        _check_pii_types(self.output_pii_redaction, "output_pii_redaction")
         if self.unknown_tool_risk not in RISK_TIERS:
             raise ValueError(
                 f"unknown_tool_risk must be one of {RISK_TIERS}, got {self.unknown_tool_risk!r}"
@@ -180,6 +197,7 @@ class Policy:
             "unknown_tool_risk": self.unknown_tool_risk,
             "detector_flag_threshold": self.detector_flag_threshold,
             "detector_block_threshold": self.detector_block_threshold,
+            "output_pii_redaction": list(self.output_pii_redaction),
             "tools": {
                 name: {
                     "allowed_roles": t.allowed_roles,
@@ -193,6 +211,7 @@ class Policy:
                     **({"review_above": t.review_above} if t.review_above is not None else {}),
                     "produces_untrusted_output": t.produces_untrusted_output,
                     "risk_tier": t.risk_tier,
+                    "output_pii_allowed": list(t.output_pii_allowed),
                 }
                 for name, t in sorted(self.tools.items())
             },
@@ -215,6 +234,7 @@ class Policy:
                 review_above=cfg.get("review_above"),
                 produces_untrusted_output=bool(cfg.get("produces_untrusted_output", False)),
                 risk_tier=cfg.get("risk_tier"),
+                output_pii_allowed=list(cfg.get("output_pii_allowed") or []),
             )
             for name, cfg in raw_tools.items()
         }
@@ -222,7 +242,7 @@ class Policy:
             "version", "default_deny", "max_spend_per_transaction",
             "max_spend_per_session", "max_calls_per_minute", "spend_arg_names",
             "spend_arg_scales", "allowed_egress_domains", "flag_only_rules", "unknown_tool_risk",
-            "detector_flag_threshold", "detector_block_threshold",
+            "detector_flag_threshold", "detector_block_threshold", "output_pii_redaction",
         }
         unknown = set(data) - known - {"tools"}
         if unknown:
@@ -242,6 +262,9 @@ class Policy:
             unknown_tool_risk=str(data.get("unknown_tool_risk", "high")),
             detector_flag_threshold=float(data.get("detector_flag_threshold", 0.5)),
             detector_block_threshold=float(data.get("detector_block_threshold", 0.85)),
+            # An explicit [] means "redact nothing", so only a missing key gets the default.
+            output_pii_redaction=(list(data["output_pii_redaction"] or [])
+                                  if "output_pii_redaction" in data else list(PII_TYPES)),
         )
 
     @classmethod

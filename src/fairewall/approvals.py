@@ -88,6 +88,9 @@ class ApprovalRequest:
     note: str = ""
     # Set when an approved call was run by the queue itself (Python API).
     executed: bool = False
+    # The learning case for this call (fairewall.learning), when one was opened.
+    # The reviewer's decision here becomes its label.
+    case_id: Optional[str] = None
     _fn: Optional[Callable[..., Any]] = field(default=None, repr=False, compare=False)
 
     @property
@@ -111,6 +114,7 @@ class ApprovalRequest:
             "decided_at": self.decided_at,
             "note": self.note,
             "executed": self.executed,
+            "case_id": self.case_id,
         }
 
     def __str__(self) -> str:
@@ -177,6 +181,7 @@ class ApprovalQueue:
             created_at=now,
             expires_at=(now + self.ttl_seconds) if self.ttl_seconds is not None else None,
             _fn=fn,
+            case_id=decision.case_id,
         )
         with self._lock:
             self._expire_locked(now)
@@ -258,6 +263,7 @@ class ApprovalQueue:
             req = self._pending_locked(request_id)
             self._decide_locked(req, ApprovalStatus.REJECTED, reviewer, note)
         self._audit("approval_rejected", req, {})
+        self._teach(req, "malicious", reviewer, note)
         return req
 
     # ---------------------------------------------------------------- reading
@@ -278,6 +284,28 @@ class ApprovalQueue:
         return sorted(items, key=lambda r: r.created_at)
 
     # -------------------------------------------------------------- internals
+
+    def _teach(self, req: ApprovalRequest, verdict: str, reviewer: str, note: str) -> None:
+        """Turn the reviewer's decision into a label, so fAIrewall learns from it.
+
+        Only calls held for a content threat have a case; business approvals
+        (a refund over the limit, a tool that always needs a person) teach nothing.
+        """
+        baseline = getattr(self.firewall, "baseline", None)
+        if baseline is not None and "baseline.novel_action" in req.rule_ids:
+            # The reviewer vouched for (or refused) this new action: the baseline learns it.
+            baseline.observe(req.principal_id, self.firewall.policy.canonical_tool(req.tool),
+                             req.arguments, self.firewall.spend_of(req.tool, req.arguments),
+                             "approved" if verdict == "benign" else "rejected", reviewer=reviewer)
+        memory = getattr(self.firewall, "memory", None)
+        if memory is None or not req.case_id:
+            return
+        from .learning import LearningError
+        try:
+            memory.label(req.case_id, verdict, reviewer, note=note, via="approval:" + req.id)
+        except LearningError as exc:  # e.g. already labelled from the review page
+            self.firewall.audit.append("learning_label_skipped", {
+                "approval_id": req.id, "case_id": req.case_id, "reason": str(exc)})
 
     def _approve(self, request_id: str, reviewer: str, note: str):
         reviewer = self._check_reviewer(reviewer)
@@ -303,9 +331,11 @@ class ApprovalQueue:
                     req.note = "Approved by %s, but the policy now blocks it: %s" % (reviewer, why)
                 self._audit("approval_rejected", req, {"recheck_reason": why,
                                                        "approved_by": reviewer})
+                self._teach(req, "benign", reviewer, note)
                 return req, None
 
             self._audit("approval_granted", req, {})
+            self._teach(req, "benign", reviewer, note)
             if req._fn is None:
                 return req, None
             fn, req._fn = req._fn, None
