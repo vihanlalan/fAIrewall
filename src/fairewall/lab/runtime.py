@@ -446,8 +446,7 @@ class Lab:
                 "policy_hash": record.get("policy_hash"), "reviewer": record.get("reviewer"),
                 "model_payload": payload}
 
-    def _scenarios(self, ws: str) -> Dict[str, Any]:
-        canary = self.canary_value(ws)
+    def _scenarios(self, canary: str) -> Dict[str, Any]:
         end = {"text_by_outcome": {"executed": "Done: the {tool} action ran.",
                                    "pending_approval": "That needs a person to approve it first; I have asked.",
                                    "blocked": "fAIrewall blocked that action, so it did not run.",
@@ -462,12 +461,14 @@ class Lab:
         return out
 
     def runner(self, ws: str) -> AgentRunner:
+        # A cold worker loads this from the registry, which also takes _cache_lock.
+        canary = self.canary_value(ws)
         with self._cache_lock:
             if ws not in self._runners:
-                clients: Dict[str, Any] = {"recorded": RecordedClient(self._scenarios(ws), model="recorded-script")}
+                clients: Dict[str, Any] = {"recorded": RecordedClient(self._scenarios(canary), model="recorded-script")}
                 if self.live is not None:
                     clients["live"] = self.live
-                system = fx.SYSTEM_PROMPT.format(canary="Reserve settlement account " + self.canary_value(ws))
+                system = fx.SYSTEM_PROMPT.format(canary="Reserve settlement account " + canary)
                 self._runners[ws] = AgentRunner(self.store, self.loc("runs"), self.agent(ws), clients=clients,
                                                 system=system, project=self._project, max_turns=6)
             return self._runners[ws]
@@ -508,7 +509,7 @@ class Lab:
         scenario = None
         if chapter is not None:
             scenario = "ch%d%s" % (chapter, "v" if variant else "")
-            if scenario not in self._scenarios(ws):
+            if scenario not in self._scenarios(self.canary_value(ws)):
                 scenario = None
         elif source == "recorded":
             scenario = self._free_play_scenario(ws, run_id, text)
