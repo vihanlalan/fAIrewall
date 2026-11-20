@@ -29,6 +29,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -161,6 +162,11 @@ class InlinePool:
     request would wait for a connection that never arrives (PoolTimeout). Here the requesting
     thread opens connections itself, checks an idle one before reuse, and the pool is rebuilt
     whenever the process id changes.
+
+    It never makes a caller wait for a slot. One request can hold a transaction on one store while
+    it opens another, so a capped pool deadlocks as soon as a few requests do that at once (each
+    holds a slot the others need). ``size`` caps only the idle connections kept for reuse; a
+    transaction pooler in front of Postgres (Neon's ``-pooler`` host) absorbs the client count.
     """
 
     def __init__(self, url: str, size: int, kwargs: Dict[str, Any]) -> None:
@@ -168,16 +174,16 @@ class InlinePool:
         self.pid = os.getpid()
         self._idle: list = []
         self._lock = threading.Lock()
-        self._slots = threading.BoundedSemaphore(self.size)
-        self.timeout = float(os.environ.get("FAIREWALL_DB_POOL_TIMEOUT_S", "30"))
 
     def _connect(self) -> Any:
         import psycopg  # type: ignore
         return psycopg.connect(self.url, connect_timeout=10, **self.kwargs)
 
-    def _usable(self, conn: Any) -> bool:
+    def _usable(self, conn: Any, idle_s: float) -> bool:
         if conn.closed or conn.broken:
             return False
+        if idle_s < 30:
+            return True  # recently used: skip the extra round trip
         try:
             conn.execute("SELECT 1")
             return True
@@ -186,17 +192,14 @@ class InlinePool:
 
     @contextmanager
     def connection(self) -> Iterator[Any]:
-        if not self._slots.acquire(timeout=self.timeout):
-            raise RuntimeError("No database connection free after %.0fs (FAIREWALL_DB_POOL_SIZE=%d)"
-                               % (self.timeout, self.size))
         conn = None
         try:
             while conn is None:
                 with self._lock:
-                    candidate = self._idle.pop() if self._idle else None
+                    candidate, since = self._idle.pop() if self._idle else (None, 0.0)
                 if candidate is None:
                     conn = self._connect()
-                elif self._usable(candidate):
+                elif self._usable(candidate, time.monotonic() - since):
                     conn = candidate
                 else:
                     try:
@@ -221,13 +224,19 @@ class InlinePool:
                         pass
                 else:
                     with self._lock:
-                        self._idle.append(conn)
-            self._slots.release()
+                        keep = len(self._idle) < self.size
+                        if keep:
+                            self._idle.append((conn, time.monotonic()))
+                    if not keep:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
     def close(self) -> None:
         with self._lock:
             idle, self._idle = self._idle, []
-        for conn in idle:
+        for conn, _ in idle:
             try:
                 conn.close()
             except Exception:
