@@ -1,0 +1,13 @@
+{
+  "status": "ok",
+  "live_model": false,
+  "model": null,
+  "recorded_scenarios": {
+    "refund_beyond_refundable": "Asks $50 back on an order with only $20 left: approved by finance, then refused by the ledger at write time.",
+    "refund_over_cap": "Asks $140 back: fAIrewall blocks it at the $100 per-refund cap. Nothing reaches the ledger.",
+    "refund_40": "Asks $40 back: looks up the order, proposes the refund, waits for finance, then reports the real outcome.",
+    "lookup_only": "Looks up an order and reports it. No refund proposed."
+  },
+  "policy_version": "refund-review-v2 (aff7f6da9333)",
+  "definitions_pending_review": []
+}

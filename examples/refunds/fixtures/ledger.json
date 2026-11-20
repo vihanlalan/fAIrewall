@@ -1,0 +1,40 @@
+{
+  "orders": [
+    {
+      "order_id": "ORD-1001",
+      "item": "Blender, 600 W",
+      "paid_cents": 12000,
+      "refunded_cents": 4000,
+      "refundable_cents": 8000
+    },
+    {
+      "order_id": "ORD-1002",
+      "item": "Kettle",
+      "paid_cents": 4550,
+      "refunded_cents": 0,
+      "refundable_cents": 4550
+    },
+    {
+      "order_id": "ORD-1003",
+      "item": "Office chair",
+      "paid_cents": 30000,
+      "refunded_cents": 28000,
+      "refundable_cents": 2000
+    }
+  ],
+  "refunds": [
+    {
+      "receipt": "rf_562d609399784f29",
+      "action_id": "562d609399784f298a46583956968184",
+      "order_id": "ORD-1001",
+      "amount_cents": 4000,
+      "created_at": 1795168141.7874253
+    }
+  ],
+  "consistency": {
+    "ledger_refunds": 1,
+    "executed_refund_actions": 1,
+    "agrees": true,
+    "problems": []
+  }
+}

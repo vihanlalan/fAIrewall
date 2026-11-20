@@ -1,15 +1,21 @@
 {
-  "version": "refund-review-v1",
+  "version": "refund-review-v2",
   "default_deny": true,
   "max_spend_per_transaction": 100,
   "max_spend_per_session": 150,
+  "spend_arg_names": ["amount"],
+  "spend_arg_scales": {"amount_cents": 0.01},
   "tools": {
     "refund": {
-      "required_args": ["order", "amount"],
-      "allowed_args": ["order", "amount"],
+      "required_args": ["order_id", "amount_cents"],
+      "allowed_args": ["order_id", "amount_cents"],
       "forbid_when_tainted": true,
       "require_human_approval": true
     },
-    "lookup_order": {"allowed_args": ["order"]}
+    "lookup_order": {
+      "required_args": ["order_id"],
+      "allowed_args": ["order_id"],
+      "risk_tier": "low"
+    }
   }
 }

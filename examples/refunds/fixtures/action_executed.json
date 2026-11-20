@@ -1,0 +1,42 @@
+{
+  "action_id": "562d609399784f298a46583956968184",
+  "tool": "refund",
+  "status": "executed",
+  "reason_codes": [
+    "schema.human_approval_required"
+  ],
+  "receipt": "rf_562d609399784f29",
+  "ledger_effect": {
+    "changed": true,
+    "type": "refund",
+    "order_id": "ORD-1001",
+    "amount_cents": 4000,
+    "receipt": "rf_562d609399784f29"
+  },
+  "policy_hash": "aff7f6da93336002",
+  "reviewer": "finance-reviewer",
+  "order_id": "ORD-1001",
+  "amount_cents": 4000,
+  "explanation": "refunds need finance approval",
+  "timeline": [
+    {
+      "status": "pending",
+      "reviewer": null,
+      "at": "2026-11-20T09:49:01.732Z",
+      "policy_hash": "aff7f6da93336002"
+    },
+    {
+      "status": "dispatching",
+      "reviewer": "finance-reviewer",
+      "at": "2026-11-20T09:49:01.785Z",
+      "policy_hash": "aff7f6da93336002"
+    },
+    {
+      "status": "executed",
+      "reviewer": "finance-reviewer",
+      "at": "2026-11-20T09:49:01.790Z",
+      "policy_hash": "aff7f6da93336002"
+    }
+  ],
+  "expires_at": 1795171741.7326808
+}

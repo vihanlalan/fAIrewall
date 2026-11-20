@@ -434,6 +434,23 @@ print(result.valid, result.checked)
 | **Velocity Limiter** | `velocity.*` | Sliding 60-second window rate limiter per-session and per-tool. Breaks infinite agent loops. |
 | **Egress & DLP** | `egress.*` | Domain allowlists. Detects credentials (AWS, OpenAI, GitHub, Stripe, JWT, SSH keys) and bulk PII (SSNs, credit cards, emails). |
 
+Mapped to the **OWASP Top 10 for Agentic Applications (2026)**, risk by risk, with the gaps stated: [docs/owasp-agentic-top10.md](docs/owasp-agentic-top10.md).
+
+### Personal data in tool output
+
+What a tool returns is screened before the agent reads it (`inspect_output`, `/v1/inspect/output`, and every tool message passing through `/v1/chat/completions`, so the model provider never receives it). Credentials are always redacted. Single personal identifiers are redacted too:
+
+| Type | Example | How false matches are avoided |
+| :--- | :--- | :--- |
+| `email` | `asha@gmail.com` | Standard address shape |
+| `phone` | `+91 98765 43210`, `022-2345-6789`, `(415) 555-0100` | Indian mobile/landline and `+`-prefixed shapes; `ORD-9876543210` is left alone |
+| `aadhaar` | `2345 6789 0124` | Verhoeff check digit must be valid |
+| `pan` | `ABCPE1234F` | Holder-type letter must be valid; a GSTIN is left alone |
+| `card` | `4111 1111 1111 1111` → `[REDACTED:card ending 1111]` | Luhn checksum |
+| `ssn` | `123-45-6789` | Exact `3-2-4` shape |
+
+All six are on by default. A tool whose job is contact details can keep some: `ToolPolicy("lookup_customer", output_pii_allowed=["email", "phone"])`. `Policy(output_pii_redaction=[])` turns single-item redaction off (credentials are still redacted). The audit log records counts per type, never the values.
+
 ---
 
 ## 🧭 Risk-Routed Detector Tier
@@ -501,6 +518,9 @@ fairewall init-policy --format json -o policy.json
 # Run the HTTP gateway (separate reviewer key for the approval queue)
 fairewall serve --host 127.0.0.1 --port 8000 --api-key AGENT_KEY --reviewer-key REVIEWER_KEY
 
+# Keep kill-switch freezes across restarts
+fairewall serve --api-key AGENT_KEY --reviewer-key REVIEWER_KEY --kill-switch-file killswitch.json
+
 # Replay a log under two policies and list changed verdicts
 fairewall diff policy.json policy_new.json log.jsonl --fail-on-looser
 ```
@@ -554,11 +574,52 @@ Over HTTP, send `"hold_for_approval": true` to `/v1/inspect/tool`. A held call c
 
 ---
 
+## 🛑 Kill Switch
+
+Stop agents now, before you know why:
+
+```python
+fw.freeze()                                          # every agent on this firewall
+fw.freeze("principal", "billing-bot", reason="duplicate refunds", by="ops")
+fw.freeze("session", "run-42")                       # one run
+fw.unfreeze("principal", "billing-bot", by="lead")
+```
+
+- Every tool call in scope is blocked with `killswitch.frozen`. This holds **even in shadow mode** and even if `flag_only_rules` lists it. A held approval that is approved during a freeze is rejected and doesn't run.
+- Over HTTP: `POST /v1/killswitch/freeze` accepts either key. `POST /v1/killswitch/unfreeze` needs the **reviewer key**, so an agent holding the gateway key can't restart itself. On the OpenAI-compatible route, a frozen agent gets HTTP 423 and the model is never called.
+- The console's Overview tab has a **Stop agents now** button. While anything is frozen, a red banner shows on every tab, and `/health` reports `"frozen": true`.
+- Freezes live in memory unless you pass `--kill-switch-file` (or `FAIREWALL_KILL_SWITCH_FILE`). If that file can't be read at startup, fAIrewall freezes everything rather than guess.
+- Engaging and releasing are both written to the hash-chained audit log.
+
+---
+
+## 🛰️ Control Plane (many gateways, one place)
+
+```bash
+fairewall control-plane --port 9000 --admin-key ADMIN_KEY --db fairewall-control.sqlite
+# open http://127.0.0.1:9000/ , register a gateway under "Add a gateway", then:
+fairewall serve --port 8000 --api-key AGENT_KEY --reviewer-key REVIEWER_KEY \
+  --control-plane http://127.0.0.1:9000 --gateway-token fwgw_...
+```
+
+- **Policy versions and rollout:** every save is a numbered, fingerprinted version. Deploy a version to an environment (`staging`, `production`), optionally in shadow mode, then promote staging to production. To roll back, deploy the earlier version. Gateways pick up changes within 10 s, without a restart. A gateway checks the policy's fingerprint before applying it.
+- **Preview before deploying:** compare any two versions, or an unsaved draft against a version. It lists every setting that changed, and replays recent decisions reported by the fleet to show which calls would become stricter or looser.
+- **Fleet health:** each gateway scores out of 100 from checks you can see: online (40), running its assigned policy and mode (25), audit chain intact (15), API key set (10), separate reviewer key (10). A gateway running anything other than its assigned policy shows as **drift**.
+- **One alert feed:** blocked and held calls from every gateway, with the arguments as the gateway logged them (secret fields masked).
+- **Fleet kill switch:** freeze every agent, one agent identity or one session on all gateways. A gateway only lifts freezes the control plane set; a freeze set locally stays.
+- **Change history:** who saved, deployed, promoted, froze or registered what, and when.
+- **Failure behaviour:** if the control plane is unreachable, gateways keep enforcing the last policy they received. Gateway tokens are stored as hashes. Every operator endpoint needs the admin key.
+- **Limits today:** single node with SQLite, one admin key (no per-user accounts or roles yet), not multi-tenant. Those come with the hosted version.
+
+---
+
 ## 🌐 HTTP Gateway Endpoints
 
 ```bash
 uvicorn fairewall.proxy:app --host 0.0.0.0 --port 8000
 ```
+
+Open **`/console`** on a running gateway for the operator console: status and active policy, the kill switch, a live feed of decisions, a form to test calls and screen text, the approval queue, and copy-paste integration snippets with the gateway's address filled in. The page holds no data itself; every panel calls the API with the key you enter.
 
 | Endpoint | Description |
 |:---------|:------------|
@@ -568,7 +629,10 @@ uvicorn fairewall.proxy:app --host 0.0.0.0 --port 8000
 | `POST /v1/inspect/input` | Screen inbound text |
 | `POST /v1/inspect/tool` | Evaluate candidate tool call |
 | `POST /v1/commit/tool` | Advance budgets after execution |
-| `POST /v1/inspect/output` | Screen a tool's output before the agent reads it: hidden instructions taint the session, secrets come back redacted |
+| `POST /v1/inspect/output` | Screen a tool's output before the agent reads it: hidden instructions taint the session, secrets and personal data come back redacted |
+| `GET  /v1/killswitch` | Active freezes (agent or reviewer key) |
+| `POST /v1/killswitch/freeze` | Stop all agents, one session or one principal (agent or reviewer key) |
+| `POST /v1/killswitch/unfreeze` | Release a freeze (reviewer key) |
 | `GET  /v1/approvals` | List held calls (reviewer key; `?status_filter=pending`) |
 | `GET  /v1/approvals/{id}` | Poll one held call (agent or reviewer key) |
 | `POST /v1/approvals/{id}/approve` | Approve, after a policy re-check (reviewer key) |
@@ -666,7 +730,31 @@ fairewall policy-suite examples/refunds/policy.json examples/refunds/suite.json
 fairewall policy-suite examples/refunds/policy.json examples/refunds/suite.json --target both --junit results.xml
 ```
 
-The workflow screens an external message, blocks a tainted refund and an over-limit refund, releases a verified refund after reopening the database, and replays all three requests under a proposed policy. A suite contains an ordered JSON array. Each step supplies a session, a text or tool input, an expected action and the exact rule IDs expected to fire. The SDK and gateway targets start with independent, empty sessions. Exit code 1 indicates a verdict or rule mismatch. The existing `diff --fail-on-looser` command gates changes in review requirements.
+The workflow reviews both tool definitions at setup, looks up an order, holds a $40 refund for finance, blocks a $140 one at the $100 cap, approves the $40 one, and retries it. The ledger ends with exactly one refund row. Money is integer cents throughout: in the tool schema (`amount_cents`), in the sandbox ledger and in the policy, where `spend_arg_scales` turns cents into dollars for the cap.
+
+### Refund desk with a Gemini agent
+
+```bash
+pip install -e ".[proxy,actions,gemini]"
+cp examples/refunds/.env.example examples/refunds/.env   # add GEMINI_API_KEY for live runs
+python examples/refunds/backend.py                       # API docs at http://127.0.0.1:8090/docs
+```
+
+Gemini only proposes calls. Automatic function calling is off, and every proposed call goes through the `ActionStore` under a server-owned principal and an idempotency key derived from the run, the tool and its arguments. The function declarations Gemini sees are built from the same tool definitions the registry validates against. The runner (`fairewall.runs.AgentRunner`):
+
+- allows one tool call per turn, and validates the whole turn before any call runs;
+- saves every model turn exactly as returned, so a run that waits for finance survives a restart and resumes with the real outcome;
+- stops in `needs_reconciliation` instead of guessing when the ledger fails mid-refund, and never re-sends the refund.
+
+Without a key, `source: "recorded"` replays scripted model turns through the same governed path. Every run reports `source` and the `model` that actually answered. The frontend contract is in [examples/refunds/CONTRACT.md](examples/refunds/CONTRACT.md), with real responses in `examples/refunds/fixtures/`. `tests/test_refund_desk.py` covers:
+
+- approval after a restart;
+- duplicate and concurrent approvals;
+- a policy change while a refund waits;
+- a model timeout after the refund executed;
+- a ledger failure with an unknown outcome.
+
+The earlier flow (tainted session, reopened database, replay under a proposed policy) is still covered by `tests/test_durable_actions.py`. A suite contains an ordered JSON array. Each step supplies a session, a text or tool input, an expected action and the exact rule IDs expected to fire. The SDK and gateway targets start with independent, empty sessions. Exit code 1 indicates a verdict or rule mismatch. The existing `diff --fail-on-looser` command gates changes in review requirements.
 
 ### Register and serve business actions
 

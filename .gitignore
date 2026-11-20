@@ -68,3 +68,7 @@ data/
 gstack/
 
 tools/_cache/
+
+# Refund desk demo data and local secrets
+examples/refunds/data/
+examples/refunds/.env

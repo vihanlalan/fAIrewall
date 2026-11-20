@@ -1,0 +1,121 @@
+{
+  "refund_beyond_refundable": {
+    "match": "ORD-1003",
+    "description": "Asks $50 back on an order with only $20 left: approved by finance, then refused by the ledger at write time.",
+    "steps": [
+      {
+        "call": {
+          "name": "lookup_order",
+          "args": {
+            "order_id": "ORD-1003"
+          }
+        }
+      },
+      {
+        "call": {
+          "name": "refund",
+          "args": {
+            "order_id": "ORD-1003",
+            "amount_cents": 5000
+          }
+        }
+      },
+      {
+        "text_by_outcome": {
+          "executed": "Refunded {refunded} on {order_id}. Receipt: {receipt}.",
+          "declined": "Nothing was refunded on {order_id}: the ledger refused it ({explanation}). Only {refundable} can still be refunded.",
+          "rejected": "Finance declined the refund on {order_id}, so nothing was refunded.",
+          "blocked": "The refund on {order_id} was blocked ({explanation}), so nothing was refunded.",
+          "expired": "The refund request on {order_id} expired before anyone approved it, so nothing was refunded.",
+          "default": "The refund on {order_id} did not go through ({status}), so nothing was refunded.",
+          "cancelled": "The refund on {order_id} was not made: the payment system confirmed nothing was written, so nothing was refunded."
+        }
+      }
+    ]
+  },
+  "refund_over_cap": {
+    "match": "\\$\\s?140\\b|14000",
+    "description": "Asks $140 back: fAIrewall blocks it at the $100 per-refund cap. Nothing reaches the ledger.",
+    "steps": [
+      {
+        "call": {
+          "name": "lookup_order",
+          "args": {
+            "order_id": "ORD-1001"
+          }
+        }
+      },
+      {
+        "call": {
+          "name": "refund",
+          "args": {
+            "order_id": "ORD-1001",
+            "amount_cents": 14000
+          }
+        }
+      },
+      {
+        "text_by_outcome": {
+          "executed": "Refunded {refunded} on {order_id}. Receipt: {receipt}.",
+          "blocked": "I couldn't refund $140.00 on {order_id}: it is {explanation}. Nothing was refunded; a smaller amount can go to finance for approval.",
+          "default": "The refund on {order_id} did not go through ({status}), so nothing was refunded.",
+          "cancelled": "The refund on {order_id} was not made: the payment system confirmed nothing was written, so nothing was refunded."
+        }
+      }
+    ]
+  },
+  "refund_40": {
+    "match": "\\$\\s?40\\b|4000",
+    "description": "Asks $40 back: looks up the order, proposes the refund, waits for finance, then reports the real outcome.",
+    "steps": [
+      {
+        "call": {
+          "name": "lookup_order",
+          "args": {
+            "order_id": "ORD-1001"
+          }
+        }
+      },
+      {
+        "call": {
+          "name": "refund",
+          "args": {
+            "order_id": "ORD-1001",
+            "amount_cents": 4000
+          }
+        }
+      },
+      {
+        "text_by_outcome": {
+          "executed": "Refunded {refunded} on {order_id} after finance approved it. Receipt: {receipt}.",
+          "rejected": "Finance declined the $40.00 refund on {order_id}, so nothing was refunded.",
+          "blocked": "The refund on {order_id} was blocked ({explanation}), so nothing was refunded.",
+          "declined": "Nothing was refunded on {order_id}: the ledger refused it ({explanation}).",
+          "expired": "The refund request on {order_id} expired before anyone approved it, so nothing was refunded.",
+          "default": "The refund on {order_id} did not go through ({status}), so nothing was refunded.",
+          "cancelled": "The refund on {order_id} was not made: the payment system confirmed nothing was written, so nothing was refunded."
+        }
+      }
+    ]
+  },
+  "lookup_only": {
+    "match": "ORD-1002|status|look ?up",
+    "description": "Looks up an order and reports it. No refund proposed.",
+    "steps": [
+      {
+        "call": {
+          "name": "lookup_order",
+          "args": {
+            "order_id": "ORD-1002"
+          }
+        }
+      },
+      {
+        "text_by_outcome": {
+          "executed": "{order_id} ({item}): paid {paid}, {refundable} can still be refunded.",
+          "default": "I couldn't look that order up ({status})."
+        }
+      }
+    ]
+  }
+}

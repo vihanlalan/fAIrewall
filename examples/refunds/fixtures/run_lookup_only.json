@@ -1,0 +1,41 @@
+{
+  "run_id": "run_524060811f65441f",
+  "status": "completed",
+  "source": "recorded",
+  "model": "recorded-script",
+  "scenario": "lookup_only",
+  "message": "What's the status of ORD-1002?",
+  "final_text": "ORD-1002 (Kettle): paid $45.50, $45.50 can still be refunded.",
+  "action_id": "416a7faa92264cab814917cea6a0c801",
+  "reason_codes": [],
+  "receipt": null,
+  "ledger_effect": {
+    "changed": false
+  },
+  "policy_version": "refund-review-v2 (aff7f6da9333)",
+  "model_latency_ms": 0.1,
+  "policy_latency_ms": 27.465,
+  "turns": 2,
+  "awaiting_action_id": null,
+  "actions": [
+    {
+      "action_id": "416a7faa92264cab814917cea6a0c801",
+      "tool": "lookup_order",
+      "status": "executed",
+      "reason_codes": [],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": null,
+      "order_id": "ORD-1002",
+      "amount_cents": null,
+      "explanation": "",
+      "policy_latency_ms": 27.465
+    }
+  ],
+  "error": null,
+  "created_at": 1795168141.9510906,
+  "updated_at": 1795168142.0626862
+}
