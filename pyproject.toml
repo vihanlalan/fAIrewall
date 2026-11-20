@@ -38,3 +38,6 @@ packages = ["src/fairewall"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"examples/refunds/policy.json" = "fairewall/demo/refund-policy.json"

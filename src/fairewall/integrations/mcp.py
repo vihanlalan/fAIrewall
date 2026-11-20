@@ -132,4 +132,6 @@ def create_action_app(store: ActionStore, agents: Dict[str, Principal], reviewer
             return dict(response, error={"code": -32601, "message": "Unknown method"})
         return dict(response, result=result)
 
+    from ..ui import mount_console
+    mount_console(app, durable=True)
     return app

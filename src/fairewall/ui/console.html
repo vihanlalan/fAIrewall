@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reviewer console · fAIrewall</title>
+
+<style>
+.hero {padding-block:30px}.hero h1{font-size:clamp(2.6rem,4.8vw,4.4rem)}.policy-art{min-height:130px}.planes{width:88px;height:88px}
+form {display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding-bottom:24px;border-bottom:1px solid var(--line);margin-bottom:30px}
+label {display:grid;gap:5px;color:var(--muted);font-size:.875rem}
+.queue-head,.request-head,.controls {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.queue-head h2{font-size:2.2rem;margin:0}.queue-head{margin-bottom:18px}
+.layout {display:grid;grid-template-columns:minmax(230px,1fr) minmax(0,2fr);gap:16px;align-items:start}
+.panel {border:1px solid var(--line);border-radius:4px;background:#fff;min-width:0}
+#list {display:grid}.row {display:grid;gap:3px;width:100%;text-align:left;border:0;background:#fff;color:var(--text);padding:15px;cursor:pointer}
+.row+.row{border-top:1px solid var(--line)}.row[aria-pressed=true]{box-shadow:inset 3px 0 var(--blue);background:var(--blue-soft)}
+.row span,.hint,.keylabel {color:var(--muted)}.row span,.hint{font-size:.9rem}
+.empty{padding:20px;margin:0;color:var(--muted)}#detail{padding:22px;overflow-wrap:anywhere}
+h3{font:normal 1.7rem var(--serif);margin:0}.tag{font:600 .78rem var(--mono);color:var(--escalate);background:var(--escalate-soft);padding:4px 9px}
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:18px 0}dt{color:var(--muted)}dd{margin:0}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--panel-2);padding:14px;font:.875rem/1.5 var(--mono)}
+summary{cursor:pointer}.controls{justify-content:flex-start;margin-top:18px}
+#notice{min-height:1.5em;margin:8px 0;color:var(--muted)}#notice.error{color:var(--block)}
+@media(max-width:700px){.layout{grid-template-columns:1fr}form label{width:100%}.hero{padding-block:24px}}
+</style>
+<link rel="stylesheet" href="ui/theme.css">
+</head>
+<body data-backend="{{backend}}">
+<a class="skip" href="#content">Skip to content</a>
+<header class="mast">
+  <div class="wrap mast-inner">
+    <a href="console" class="wordmark" aria-label="fAIrewall console"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>f<span>AI</span>rewall</a>
+    <nav aria-label="Main navigation"><a href="console" aria-current="page">Console</a><a href="https://github.com/vihanlalan/fAIrewall#readme">Docs</a><a href="https://github.com/vihanlalan/fAIrewall/issues">Contact us</a></nav>
+  <div class="mast-end"><span class="preview-label">Operator console</span></div></div></header>
+<main id="content" class="wrap console-shell" tabindex="-1">
+<aside class="rail"><div class="rail-head"><span class="gateway-mark" aria-hidden="true"><i></i><i></i><i></i></span><div><b>Reviewer gateway</b><span>{{backend}} workspace</span></div></div>
+<nav aria-label="Console sections"><a href="#access">Reviewer access</a><a href="#requests">Pending requests</a></nav></aside>
+<div class="console-main"><h1>Reviewer console</h1><p class="lead">Inspect the request and its policy findings before releasing a held action.</p>
+<form id="access">
+ <label>Reviewer key<input id="key" type="password" autocomplete="off" spellcheck="false"></label>
+ <label id="name-field">Reviewer name<input id="name" autocomplete="off"></label>
+ <button class="btn primary" type="submit" id="connect">Load queue</button>
+ <button class="btn" type="button" id="clear" hidden>Disconnect</button>
+</form>
+<div class="queue-head" id="requests"><h2>Pending requests</h2><span class="keylabel" id="count"></span></div>
+<div id="notice" role="status" aria-live="polite">Load the queue to review held actions.</div>
+<div class="layout" id="queue" hidden>
+ <div class="panel" id="list" aria-label="Pending requests"></div>
+ <article class="panel" id="detail" aria-label="Request details"></article>
+</div>
+</div></main>
+<footer class="wrap company-footer"><strong>fAIrewall</strong><a href="https://github.com/vihanlalan/fAIrewall#readme">Documentation</a></footer>
+<script>
+"use strict";
+const el = id => document.getElementById(id);
+const durable = document.body.dataset.backend === "durable";
+const endpoint = durable ? "reviews" : "v1/approvals";
+el("name-field").hidden = durable;
+let rows = [], selected = null, busy = false;
+function node(tag, value, cls) {
+  const n = document.createElement(tag);
+  if (value !== undefined) n.textContent = value;
+  if (cls) n.className = cls;
+  return n;
+}
+function notice(message, error=false) {
+  el("notice").textContent = message;
+  el("notice").className = error ? "error" : "";
+}
+function reset() {
+  rows = []; selected = null;
+  el("list").replaceChildren(); el("detail").replaceChildren();
+  el("queue").hidden = true; el("clear").hidden = true;
+  el("count").textContent = ""; el("connect").textContent = "Load queue";
+}
+async function request(url, body) {
+  const headers = {Accept:"application/json"};
+  if (el("key").value) headers.Authorization = "Bearer " + el("key").value;
+  if (body) headers["Content-Type"] = "application/json";
+  const response = await fetch(url,{method:body ? "POST" : "GET", headers,
+    body:body ? JSON.stringify(body) : undefined, cache:"no-store", redirect:"error"});
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) throw Error("Access denied. Check your reviewer key.");
+    throw Error("The server returned HTTP " + response.status + ". Refresh the queue to check the current state.");
+  }
+  return response.json();
+}
+function principal(r) {return durable ? r.principal.id : r.principal_id}
+function render() {
+  el("count").textContent = rows.length + " pending";
+  el("list").replaceChildren(); el("detail").replaceChildren();
+  if (!rows.length) {
+    el("list").append(node("p","No requests awaiting review.","empty"));
+    el("detail").hidden = true;
+    return;
+  }
+  el("detail").hidden = false;
+  rows.forEach(r => {
+    const b = node("button",undefined,"row");
+    b.setAttribute("aria-pressed",String(r.id === selected));
+    b.append(node("strong",r.tool),node("span",principal(r)));
+    b.onclick = () => {if (!busy) {selected = r.id; render();}};
+    el("list").append(b);
+  });
+  const r = rows.find(item => item.id === selected);
+  const d = el("detail"), head = node("div",undefined,"request-head");
+  head.append(node("h3",r.tool),node("span","Pending","tag")); d.append(head);
+  const meta = node("dl");
+  for (const [k,v] of [["Requester",principal(r)],["Session",r.session || r.session_id],["Request ID",r.id]]) {
+    meta.append(node("dt",k),node("dd",v));
+  }
+  d.append(meta,node("div","Arguments","keylabel"),node("pre",JSON.stringify(r.arguments,null,2)));
+  d.append(node("div","Policy findings","keylabel"),node("p",r.reason || (r.rules || []).join(", ") || "Manual review requested."));
+  if (r.definition) {
+    const details = node("details");
+    details.append(node("summary","Registered tool definition"),node("pre",JSON.stringify(r.definition,null,2)));
+    d.append(details);
+  }
+  const controls = node("div",undefined,"controls");
+  for (const approve of [true,false]) {
+    const b = node("button",approve ? "Approve request" : "Reject request",approve ? "btn primary" : "btn");
+    b.onclick = () => decide(r,approve); controls.append(b);
+  }
+  d.append(controls);
+}
+async function load(message) {
+  const response = await request(endpoint + (durable ? "" : "?status_filter=pending"));
+  rows = durable ? response : response.approvals;
+  if (!rows.some(r=>r.id===selected)) selected = rows.length ? rows[0].id : null;
+  render(); el("queue").hidden = false; el("clear").hidden = false;
+  el("connect").textContent = "Refresh queue"; notice(message || "");
+}
+function lock(value) {
+  busy = value;
+  document.querySelectorAll("button,input").forEach(control=>control.disabled=value);
+}
+async function decide(r,approve) {
+  if (busy) return;
+  if (!durable && !el("name").value.trim()) {
+    notice("Enter your reviewer name before recording a decision.",true); el("name").focus(); return;
+  }
+  lock(true); notice("Recording decision…");
+  try {
+    const result = await request(endpoint + "/" + encodeURIComponent(r.id) +
+      (durable ? "" : approve ? "/approve" : "/reject"),
+      durable ? {approve} : {reviewer:el("name").value.trim()});
+    await load(r.tool + " · " + result.status);
+  } catch (error) {reset();notice(error.message,true);}
+  finally {lock(false);}
+}
+el("access").onsubmit = async event => {
+  event.preventDefault(); if (busy) return; lock(true); notice("Loading requests…");
+  try {await load();} catch (error) {reset();notice(error.message,true);} finally {lock(false);}
+};
+el("key").oninput = () => {reset();notice("Load the queue with this reviewer key.");};
+el("clear").onclick = () => {el("access").reset();reset();notice("Disconnected.");};
+</script>
+</body>
+</html>

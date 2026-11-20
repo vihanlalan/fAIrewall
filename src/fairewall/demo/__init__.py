@@ -27,12 +27,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, Header, HTTPException
     from fastapi.responses import HTMLResponse, RedirectResponse
     from pydantic import BaseModel, Field
 except ImportError as exc:  # pragma: no cover
     raise ImportError("The demo needs `pip install fairewall[proxy]`") from exc
 
+from typing import Literal
+
+from . import refunds
 from ..approvals import APPROVAL_ONLY_RULE, ApprovalError, ApprovalQueue, needs_human
 from ..audit import verify_chain
 from ..detectors import LearnedDetector
@@ -382,6 +385,7 @@ class DemoState:
     def __init__(self) -> None:
         self.firewall = make_firewall()
         self.queue = ApprovalQueue(self.firewall)
+        self.refund_queue = refunds.new_refund_queue()
         self._runs = itertools.count(1)
         _warm_up()
 
@@ -465,6 +469,8 @@ class TamperPayload(BaseModel):
 
 def create_demo_app() -> FastAPI:
     app = FastAPI(title="fAIrewall demo", version="0.2.0", docs_url=None, redoc_url=None)
+    from ..ui import mount_theme
+    mount_theme(app)
     holder = {"state": DemoState()}
     swap = threading.Lock()
     threading.Thread(target=_warm_report, name="fairewall-demo-warmup", daemon=True).start()
@@ -479,6 +485,59 @@ def create_demo_app() -> FastAPI:
     @app.get("/demo", response_class=HTMLResponse, include_in_schema=False)
     def page() -> HTMLResponse:
         return HTMLResponse(_PAGE.read_text(encoding="utf-8"))
+
+    # An unkeyed sandbox assigns its simulated reviewer to the presenter. A
+    # configured gateway reviewer key restricts both the view and the mutation.
+    import hmac
+    import os
+    reviewer_key = os.environ.get("FAIREWALL_REVIEWER_KEY")
+
+    def can_review(authorization):
+        return not reviewer_key or hmac.compare_digest((authorization or "").encode(),
+                                                      ("Bearer " + reviewer_key).encode())
+
+    def visible_run(run, authorization):
+        return dict(run, reviewer=run["reviewer"] if can_review(authorization) else None)
+
+    @app.get("/demo/api/refunds/mode")
+    def refund_mode():
+        return {"live_model": refunds.live_model()}
+
+    @app.post("/demo/api/refunds/run/{mode}")
+    def refund_run(mode: Literal["recorded", "live"], authorization: Optional[str] = Header(None)):
+        return visible_run(refunds.walkthrough(state(), mode), authorization)
+
+    @app.get("/demo/api/refunds/runs/{run_id}")
+    def refund_status(run_id: str, authorization: Optional[str] = Header(None)):
+        return visible_run(refunds.get_run(state(), run_id), authorization)
+
+    @app.post("/demo/api/refunds/runs/{run_id}/{action_id}/{choice}")
+    def refund_review(run_id: str, action_id: str, choice: Literal["approve", "reject"],
+                      authorization: Optional[str] = Header(None)):
+        if not can_review(authorization):
+            raise HTTPException(401, "Reviewer credential required")
+        current = state()
+        run = refunds.get_run(current, run_id)
+        action = next((a for a in run["calls"] if a["action_id"] == action_id), None)
+        if not action or not action["approval_id"]:
+            raise HTTPException(404, "Unknown review action")
+        review = current.refund_queue.approve if choice == "approve" else current.refund_queue.reject
+        try:
+            review(action["approval_id"], reviewer=run["reviewer"])
+        except ApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return refunds.get_run(current, run_id)
+
+    @app.get("/demo/api/refunds/preview")
+    def refund_preview(cap: float):
+        import math
+        if not math.isfinite(cap) or cap <= 0:
+            raise HTTPException(422, "Enter a finite positive transaction cap")
+        return refunds.preview(cap)
+
+    @app.get("/demo/api/refunds/buyer/{team}")
+    def refund_buyer(team: Literal["apparel", "home"]):
+        return refunds.buyer_report(team)
 
     @app.get("/demo/api/scenarios")
     def scenarios() -> Dict[str, Any]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -56,7 +57,11 @@ class ToolPolicy:
     # this tool. None = inferred from the other constraints (see Policy.risk_tier).
     risk_tier: Optional[str] = None
 
+    review_above: Optional[float] = None
+
     def __post_init__(self) -> None:
+        if self.review_above is not None and (not math.isfinite(self.review_above) or self.review_above < 0):
+            raise ValueError("review_above must be a finite nonnegative amount")
         if self.risk_tier is not None and self.risk_tier not in RISK_TIERS:
             raise ValueError(
                 f"Tool {self.name!r}: risk_tier must be one of {RISK_TIERS} or None, "
@@ -185,6 +190,7 @@ class Policy:
                     "rate_limit_per_minute": t.rate_limit_per_minute,
                     "forbid_when_tainted": t.forbid_when_tainted,
                     "require_human_approval": t.require_human_approval,
+                    **({"review_above": t.review_above} if t.review_above is not None else {}),
                     "produces_untrusted_output": t.produces_untrusted_output,
                     "risk_tier": t.risk_tier,
                 }
@@ -206,6 +212,7 @@ class Policy:
                 rate_limit_per_minute=cfg.get("rate_limit_per_minute"),
                 forbid_when_tainted=bool(cfg.get("forbid_when_tainted", False)),
                 require_human_approval=bool(cfg.get("require_human_approval", False)),
+                review_above=cfg.get("review_above"),
                 produces_untrusted_output=bool(cfg.get("produces_untrusted_output", False)),
                 risk_tier=cfg.get("risk_tier"),
             )

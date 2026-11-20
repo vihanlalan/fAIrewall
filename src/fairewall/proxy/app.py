@@ -478,4 +478,6 @@ def create_app(
 
         return JSONResponse(content=resp_data, status_code=200)
 
+    from ..ui import mount_console
+    mount_console(app, durable=False)
     return app

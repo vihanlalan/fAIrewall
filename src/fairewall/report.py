@@ -20,6 +20,8 @@ estimate, never as a measurement.
 from __future__ import annotations
 
 import json
+import math
+import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -277,12 +279,17 @@ def render_text(report: Dict[str, Any]) -> str:
 _BUCKET_LABEL = {"auto_approved": "AUTO-APPROVED", "human_review": "HUMAN REVIEW", "blocked": "BLOCKED"}
 
 
+REFUND_BANDS = ((25, "$0–25"), (50, "Over $25–50"), (100, "Over $50–100"),
+                (200, "Over $100–200"), (float("inf"), "Over $200"))
+
+
 def build_diff(
     records: Iterable[Dict[str, Any]],
     old_policy: Policy,
     new_policy: Policy,
     detectors: Optional[Sequence[Detector]] = None,
     max_examples: int = 20,
+    refund_metrics: bool = False,
 ) -> Dict[str, Any]:
     """Replay *records* under two policies and list every call whose verdict changes.
 
@@ -305,11 +312,34 @@ def build_diff(
     found: Dict[str, List[Dict[str, Any]]] = {"looser": [], "stricter": []}
     latencies: List[float] = []
     total = stricter = looser = 0
+    bands = defaultdict(Counter)
+    old_ms, new_ms, delta_ms = [], [], []
 
     for index, rec in enumerate(records, 1):
         total += 1
+        start = time.perf_counter_ns() if refund_metrics else 0
         old_b, old_rules = _replay_one(fw_old, rec, latencies)
+        midpoint = time.perf_counter_ns() if refund_metrics else 0
         new_b, new_rules = _replay_one(fw_new, rec, latencies)
+        if refund_metrics:
+            old_ms.append((midpoint - start) / 1e6)
+            new_ms.append((time.perf_counter_ns() - midpoint) / 1e6)
+            delta_ms.append(new_ms[-1] - old_ms[-1])
+            amount = (rec.get("arguments") or {}).get("amount")
+            if (type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0
+                    or rec.get("reviewer_decision") not in (None, "approve", "refuse")):
+                raise ValueError("Refund metrics require nonnegative numeric USD amounts and "
+                                 "reviewer_decision approve, refuse or omitted (row %d)" % index)
+            band = next((name for limit, name in REFUND_BANDS if amount <= limit), "Over $200")
+            cohort = bands[band]
+            cohort["requests"] += 1
+            cohort["old_review"] += old_b == "human_review"
+            cohort[new_b] += 1
+            label = rec.get("reviewer_decision")
+            if label in ("approve", "refuse") and new_b != "human_review":
+                cohort["compared"] += 1
+                cohort["disagreements"] += (new_b == "auto_approved") != (label == "approve")
+
         old_buckets[old_b] += 1
         new_buckets[new_b] += 1
         if old_b == new_b:
@@ -339,6 +369,12 @@ def build_diff(
     examples = (found["looser"] + found["stricter"])[:max_examples]
     keys = ("auto_approved", "human_review", "blocked")
     return {
+        **({"refund_metrics": {
+            "bands": {name: dict(bands[name]) for _, name in REFUND_BANDS if name in bands},
+            "current_p95_ms": round(_percentile(old_ms, 95), 4),
+            "proposed_p95_ms": round(_percentile(new_ms, 95), 4),
+            "paired_added_p95_ms": round(_percentile(delta_ms, 95), 4),
+        }} if refund_metrics else {}),
         "total_calls": total,
         "changed": stricter + looser,
         "stricter": stricter,
@@ -369,6 +405,15 @@ def render_diff_text(diff: Dict[str, Any]) -> str:
         o, n = diff["old"]["buckets"][key], diff["new"]["buckets"][key]
         lines.append("  %-14s %8d %8d %+8d" % (_BUCKET_LABEL[key], o, n, n - o))
     lines.append("")
+    if "refund_metrics" in diff:
+        metrics = diff["refund_metrics"]
+        lines.append("USD band | requests | current review | proposed review | disagreements / compared")
+        for band, counts in metrics["bands"].items():
+            lines.append("%s | %d | %d | %d | %d / %d" % (band, counts["requests"],
+                         counts["old_review"], counts.get("human_review", 0),
+                         counts.get("disagreements", 0), counts.get("compared", 0)))
+        lines.append("Local replay p95 (ms): current %.4f, proposed %.4f, paired added %.4f"
+                     % (metrics["current_p95_ms"], metrics["proposed_p95_ms"], metrics["paired_added_p95_ms"]))
     if not diff["changed"]:
         lines.append("No call changes verdict under the new policy.")
         return "\n".join(lines)

@@ -163,7 +163,11 @@ class FinancialRule(Rule):
     def evaluate(self, call: ToolCall, ctx: Context, policy: Policy) -> List[Finding]:
         findings: List[Finding] = []
         amounts = self._amounts(call, policy)
+        tool_policy = policy.tool(call.tool)
         if not amounts:
+            if tool_policy and tool_policy.review_above is not None:
+                findings.append(Finding("financial.unparseable_amount", Action.BLOCK, Severity.HIGH,
+                                        "The amount required to evaluate the review threshold is missing."))
             return findings
 
         for path, (field_name, amount, raw) in amounts.items():
@@ -223,6 +227,11 @@ class FinancialRule(Rule):
                 )
 
         total = self._spend_total(call, policy)
+        if tool_policy and tool_policy.review_above is not None and total > tool_policy.review_above:
+            findings.append(Finding(
+                rule_id="schema.human_approval_required", action=Action.BLOCK, severity=Severity.MEDIUM,
+                message=f"Amount {total:.2f} exceeds the automatic refund limit {tool_policy.review_above:.2f}.",
+                evidence={"amount": total, "review_above": tool_policy.review_above}))
         with self._lock:
             current_spend = self._session_spend[ctx.session_id]
         projected = current_spend + total

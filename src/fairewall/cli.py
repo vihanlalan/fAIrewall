@@ -341,8 +341,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
         print("Error: the log has no tool-call records.", file=sys.stderr)
         return 2
 
-    diff = build_diff(records, old_policy, new_policy, detectors=_detectors(args),
-                      max_examples=args.examples)
+    try:
+        diff = build_diff(records, old_policy, new_policy, detectors=_detectors(args),
+                          max_examples=args.examples, refund_metrics=args.refund_metrics)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     out = json.dumps(diff, indent=2) if args.json else render_diff_text(diff)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:
@@ -509,6 +513,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_diff.add_argument("old", help="Current policy: a JSON/YAML file or a preset name")
     p_diff.add_argument("new", help="Proposed policy: a JSON/YAML file or a preset name")
     p_diff.add_argument("log", help="Path to a JSONL tool-call log")
+    p_diff.add_argument("--refund-metrics", action="store_true",
+                        help="Compare USD refund bands, reviewer labels and paired replay latency")
     p_diff.add_argument("--examples", type=int, default=20,
                         help="How many changed calls to list (default: 20)")
     p_diff.add_argument("--fail-on-looser", action="store_true",
