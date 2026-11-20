@@ -186,14 +186,30 @@ def create_app(
                 bearer = parts[1]
         return bearer or x_api_key
 
-    def _key_matches(supplied: Optional[str], expected: Optional[str]) -> bool:
-        return bool(supplied and expected and hmac.compare_digest(supplied, expected))
+    def _key_matches(supplied: Any, expected: Optional[str]) -> bool:
+        """``supplied`` may be one key or several candidates (bearer and X-API-Key).
+
+        Behind Cloud Run's IAM, Authorization carries Google's identity token,
+        so the fAIrewall key arrives in X-API-Key: either header may hold it.
+        """
+        if not expected:
+            return False
+        candidates = supplied if isinstance(supplied, (list, tuple)) else [supplied]
+        return any(c and hmac.compare_digest(c, expected) for c in candidates)
+
+    def _candidates(authorization: Optional[str], x_api_key: Optional[str]) -> List[Optional[str]]:
+        bearer = None
+        if authorization:
+            parts = authorization.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                bearer = parts[1]
+        return [bearer, x_api_key]
 
     def _require_reviewer(authorization: Optional[str], x_api_key: Optional[str]) -> None:
         """Raise HTTP 401 unless the caller holds the reviewer key."""
         if not effective_reviewer_key:
             return  # no key configured: open access (local dev)
-        if not _key_matches(_supplied_key(authorization, x_api_key), effective_reviewer_key):
+        if not _key_matches(_candidates(authorization, x_api_key), effective_reviewer_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Reviewer key required. Supply via 'Authorization: Bearer <key>' "
@@ -204,7 +220,7 @@ def create_app(
         """Raise HTTP 401 unless the caller holds the agent key or the reviewer key."""
         if not (effective_api_key or effective_reviewer_key):
             return
-        supplied = _supplied_key(authorization, x_api_key)
+        supplied = _candidates(authorization, x_api_key)
         if not (_key_matches(supplied, effective_api_key)
                 or _key_matches(supplied, effective_reviewer_key)):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -214,7 +230,7 @@ def create_app(
         """Raise HTTP 401 if the request does not carry a valid API key."""
         if not effective_api_key:
             return  # no key configured → open access (local dev)
-        supplied = _supplied_key(authorization, x_api_key)
+        supplied = _candidates(authorization, x_api_key)
         if not _key_matches(supplied, effective_api_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -506,7 +522,7 @@ def create_app(
     def _is_reviewer(authorization: Optional[str], x_api_key: Optional[str]) -> bool:
         if not effective_reviewer_key:
             return True
-        return _key_matches(_supplied_key(authorization, x_api_key), effective_reviewer_key)
+        return _key_matches(_candidates(authorization, x_api_key), effective_reviewer_key)
 
     @app.post("/v1/sessions/{session_id}/scope")
     async def set_scope(

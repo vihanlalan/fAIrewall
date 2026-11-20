@@ -84,7 +84,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS canaries (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
     session_id TEXT, created REAL NOT NULL, issued_by TEXT NOT NULL DEFAULT '',
-    tripped INTEGER NOT NULL DEFAULT 0, last_tripped REAL);
+    tripped INTEGER NOT NULL DEFAULT 0, last_tripped REAL, ns TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)
 """
 
@@ -94,11 +94,15 @@ class CanaryRegistry:
 
     def __init__(self, target: Any = ":memory:", *, email_domain: str = "example.com",
                  refresh_s: float = 2.0, audit: Any = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, namespace: str = "") -> None:
+        """``namespace`` isolates canaries (one workspace per Lab visitor)."""
         self.email_domain, self.refresh_s = email_domain, refresh_s
+        self.ns = namespace
         self.audit, self._clock = audit, clock
         self.db = Database(target, schema="fairewall_canaries")
         self.db.create(_SCHEMA)
+        from .learning import _add_ns_column
+        _add_ns_column(self.db, "canaries")
         self._lock = threading.Lock()
         self._loaded: List[Dict[str, Any]] = []
         self._generation: Optional[str] = None
@@ -111,9 +115,9 @@ class CanaryRegistry:
         value = make_value(kind, self.email_domain)
         cid = "can_" + hashlib.sha256(value.encode()).hexdigest()[:12]
         with self.db.transaction() as db:
-            db.execute("INSERT INTO canaries (id, kind, value, label, session_id, created, issued_by)"
-                       " VALUES (?,?,?,?,?,?,?)",
-                       (cid, kind, value, label[:200], session_id, self._clock(), issued_by[:100]))
+            db.execute("INSERT INTO canaries (id, kind, value, label, session_id, created, issued_by, ns)"
+                       " VALUES (?,?,?,?,?,?,?,?)",
+                       (cid, kind, value, label[:200], session_id, self._clock(), issued_by[:100], self.ns))
             db.execute("INSERT INTO meta VALUES ('generation', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
                        (secrets.token_hex(8),))
         self._refresh(force=True)
@@ -127,7 +131,7 @@ class CanaryRegistry:
         """Issued canaries without their values (who can see this must not learn them)."""
         with self.db.transaction() as db:
             rows = list(db.execute("SELECT id, kind, label, session_id, created, issued_by, tripped,"
-                                   " last_tripped FROM canaries ORDER BY created"))
+                                   " last_tripped FROM canaries WHERE ns=? ORDER BY created", (self.ns,)))
         return [dict(r) for r in rows]
 
     def _refresh(self, force: bool = False) -> None:
@@ -141,7 +145,8 @@ class CanaryRegistry:
                 generation = row["v"] if row else ""
                 if generation == self._generation and not force:
                     return
-                rows = [dict(r) for r in db.execute("SELECT id, kind, value, session_id FROM canaries")]
+                rows = [dict(r) for r in db.execute("SELECT id, kind, value, session_id FROM canaries"
+                                                    " WHERE ns=?", (self.ns,))]
             for r in rows:
                 r["variants"] = _variants(r["value"])
             self._loaded, self._generation = rows, generation

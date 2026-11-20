@@ -144,10 +144,15 @@ class GeminiClient:
     source = "live"
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
-                 timeout_s: float = 30.0) -> None:
-        key = (api_key if api_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
-        if key.lower() in PLACEHOLDER_KEYS:
-            raise ModelError("not_configured", "GEMINI_API_KEY is not set; live runs are unavailable.")
+                 timeout_s: float = 30.0, *, vertex: Optional[bool] = None,
+                 project: Optional[str] = None, location: Optional[str] = None) -> None:
+        """Gemini through an API key (Google AI Studio) or Vertex AI.
+
+        Vertex AI needs no key: it uses Application Default Credentials (on
+        Cloud Run, the service's own identity, which needs roles/aiplatform.user).
+        It is chosen with ``vertex=True`` or GOOGLE_GENAI_USE_VERTEXAI=true, with
+        GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION (default asia-south1).
+        """
         try:
             from google import genai
             from google.genai import types
@@ -155,8 +160,26 @@ class GeminiClient:
             raise ModelError("not_configured", "Live runs need `pip install fairewall[gemini]`.") from exc
         self._types = types
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
-        self._client = genai.Client(api_key=key,
-                                    http_options=types.HttpOptions(timeout=int(timeout_s * 1000)))
+        if vertex is None:
+            vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true")
+        http = types.HttpOptions(timeout=int(timeout_s * 1000))
+        if vertex:
+            project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            location = location or os.environ.get("GOOGLE_CLOUD_LOCATION") or "asia-south1"
+            if not project:
+                raise ModelError("not_configured", "Vertex AI needs GOOGLE_CLOUD_PROJECT.")
+            try:
+                self._client = genai.Client(vertexai=True, project=project, location=location,
+                                            http_options=http)
+            except Exception as exc:  # no Application Default Credentials, for example
+                raise ModelError("not_configured", "Vertex AI unavailable: %s" % exc) from exc
+            self.backend = "vertex:%s" % location
+            return
+        key = (api_key if api_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
+        if key.lower() in PLACEHOLDER_KEYS:
+            raise ModelError("not_configured", "GEMINI_API_KEY is not set; live runs are unavailable.")
+        self._client = genai.Client(api_key=key, http_options=http)
+        self.backend = "gemini-api"
 
     def generate(self, history: List[Dict[str, Any]], *, tools: List[Dict[str, Any]], system: str,
                  scenario: Optional[str] = None) -> ModelResponse:

@@ -95,6 +95,7 @@ class Firewall:
         state: Any = None,
         baseline: Any = None,
         canaries: Any = None,
+        freeze_store: Any = None,
     ) -> None:
         self.policy = policy or Policy()
         self.rules: List[Rule] = list(rules) if rules is not None else list(default_rules())
@@ -132,6 +133,10 @@ class Firewall:
         # Shared gateway state (fairewall.state.GatewayState): sessions and
         # freezes live in the database so every instance sees the same ones.
         self.state = state
+        # Where freezes live. The gateway state when there is one; otherwise an
+        # optional freeze-only store (anything with freezes/put_freeze/drop_freeze),
+        # so a runtime that keeps its own sessions still shares the kill switch.
+        self._freeze_store = state if state is not None else freeze_store
         # Against attacks no detector recognises (fairewall.baseline, fairewall.canary):
         #   baseline -- hold an agent's first-ever action of a kind in a tainted session;
         #   canaries -- planted decoy values; one in an outgoing call is certain theft.
@@ -144,7 +149,12 @@ class Firewall:
             if part is not None and getattr(part, "audit", None) is None:
                 part.audit = self.audit
         if memory is not None and sampler is not None:
-            memory.on_label.append(self._arbitrate_source)
+            # Once per (memory, sampler) pair: firewalls built per call must not
+            # pile up hooks, and a label must settle a source's stake exactly once.
+            hooked = memory.__dict__.setdefault("_sampler_hooks", set())
+            if id(sampler) not in hooked:
+                hooked.add(id(sampler))
+                memory.on_label.append(functools.partial(_arbitrate_source, sampler))
 
     # ------------------------------------------------------------ kill switch
 
@@ -167,8 +177,8 @@ class Firewall:
                 "by": (by or "").strip()[:100] or "operator",
                 "at": existing["at"] if existing else time.time(),
             }
-            if self.state is not None:
-                record = self.state.put_freeze(record)
+            if self._freeze_store is not None:
+                record = self._freeze_store.put_freeze(record)
             self._freezes[key] = record
             self._save_freezes()
         self.audit.append("kill_switch_engaged", {
@@ -188,8 +198,8 @@ class Firewall:
         by = (by or "").strip()[:100] or "operator"
         with self._lock:
             record = self._freezes.pop(key, None)
-            if self.state is not None:
-                record = self.state.drop_freeze(*key) or record
+            if self._freeze_store is not None:
+                record = self._freeze_store.drop_freeze(*key) or record
             if record is not None:
                 self._save_freezes()
         if record is None:
@@ -206,14 +216,14 @@ class Firewall:
 
     def freezes(self) -> List[Dict[str, Any]]:
         """Every active freeze, oldest first."""
-        if self.state is not None:
+        if self._freeze_store is not None:
             return [dict(r) for r in self._shared_freezes().values()]
         with self._lock:
             return sorted((dict(r) for r in self._freezes.values()), key=lambda r: r["at"])
 
     def frozen_for(self, ctx: Context) -> Optional[Dict[str, Any]]:
         """The freeze that stops this context, or None. A global freeze wins."""
-        if self.state is not None:
+        if self._freeze_store is not None:
             table = self._shared_freezes()
         elif not self._freezes:  # hot path: nothing frozen costs one truthiness check
             return None
@@ -230,7 +240,7 @@ class Firewall:
     def _shared_freezes(self) -> Dict[Tuple[str, str], Dict[str, Any]]:
         """Freezes from the shared database. If it can't be read, everything is frozen."""
         try:
-            rows = self.state.freezes()
+            rows = self._freeze_store.freezes()
         except Exception as exc:
             return {("all", "*"): {
                 "scope": "all", "target": "*", "by": "fairewall", "at": time.time(),
@@ -461,23 +471,43 @@ class Firewall:
         """
         started = time.perf_counter()
         ctx = ctx or self.session()
+        stages: List[Dict[str, Any]] = [{
+            "stage": "provenance", "status": "pass",
+            "reason": "%s content from %s%s" % (trust.value.capitalize(), source,
+                                                "; the session will be tainted" if trust is Trust.UNTRUSTED else ""),
+            "evidence": {"trust": trust.value, "source": source}}]
+        t = time.perf_counter()
         findings = scan_text(text, trust=trust, location=source)
+        stages.append(_stage("rules", _worst(f.action for f in findings), t,
+                             "; ".join(f.message for f in findings)[:600]
+                             or "No known injection phrasing.", _ids(findings)))
+        t = time.perf_counter()
         route = route_inbound(trust, self._routing_view(findings))
+        stages.append(_stage("router", "escalate" if route.escalate else "skipped", t,
+                             _ROUTE_REASON.get(route.reason, route.reason),
+                             evidence={"route": route.reason, "trust": trust.value}))
         tiers = ["t0"]
         scores: List[Tuple[str, float]] = []
+        report: List[Dict[str, Any]] = []
         plan = self.sampler.plan(source) if (self.sampler is not None and trust is Trust.UNTRUSTED) else None
         if route.escalate and self.detectors and text:
-            tiers.extend(self._run_tier1(text, route, source, findings, scores, plan))
+            tiers.extend(self._run_tier1(text, route, source, findings, scores, plan, report))
+        stages.extend(_detector_stages(self.detectors, report, route, has_text=bool(text), plan=plan))
         if plan is not None and plan.status == "quarantined":
             findings.append(_quarantine_finding(plan))
         case_id = None
         if self.memory is not None and text and (route.escalate or _has_signal(findings)):
             tiers.append("memory")
+            t = time.perf_counter()
             assessment = self.memory.assess(
                 kind="input", text=text, findings=findings, scores=scores,
                 source=plan.source if plan else source, session=ctx.session_id,
                 principal=ctx.principal.id, excerpt=self._excerpt(text))
             findings, case_id = assessment.apply(findings), assessment.case_id
+            stages.append(_memory_stage(assessment, t))
+        elif self.memory is not None:
+            stages.append({"stage": "memory", "status": "skipped",
+                           "reason": "No threat signal and not routed, so past cases were not consulted."})
         findings = [self._apply_shadow(f) for f in findings]
 
         if trust is Trust.UNTRUSTED:
@@ -494,7 +524,9 @@ class Firewall:
             route=route.reason,
             threat_score=threat_score(findings, scores),
             case_id=case_id,
+            stages=stages,
         )
+        decision.stages.append(_verdict_stage(decision))
         extra = {
             "trust": trust.value,
             "source": source,
@@ -545,15 +577,21 @@ class Firewall:
         started = time.perf_counter()
         ctx = ctx or self.session(session_id, principal)
         call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
+        stages: List[Dict[str, Any]] = []
 
+        t = time.perf_counter()
         freeze = self.frozen_for(ctx)
+        stages.append(_stage("kill_switch", "block" if freeze else "pass", t,
+                             "Frozen: %s" % freeze["reason"] if freeze else "No freeze covers this run or agent.",
+                             [KILL_SWITCH_RULE] if freeze else []))
         if freeze is not None:
             # Deliberately not passed through _apply_shadow: shadow mode and
             # flag_only_rules cannot soften a freeze.
+            stages.append({"stage": "rules", "status": "skipped", "reason": "Stopped by the kill switch."})
             decision = Decision.from_findings(
                 [_freeze_finding(freeze)], call_id=call.id, session_id=ctx.session_id,
                 tool=tool, latency_ms=(time.perf_counter() - started) * 1000,
-                tiers=["t0"], route="kill_switch",
+                tiers=["t0"], route="kill_switch", stages=stages,
             )
             self._log("tool_call_inspected", decision, ctx,
                       {"arguments": redact(call.arguments), "kill_switch": freeze})
@@ -562,53 +600,91 @@ class Firewall:
         findings: List[Finding] = []
         canary_hits: List[Dict[str, Any]] = []
         if self.canaries is not None:
+            t = time.perf_counter()
             canary_hits = self.canaries.scan(
                 json.dumps(call.arguments, default=str, ensure_ascii=False), ctx.session_id)
             if canary_hits:
                 findings.append(self.canaries.finding(canary_hits, tool))
+            stages.append(_stage("canary", "block" if canary_hits else "pass", t,
+                                 "A planted decoy value is in the arguments." if canary_hits
+                                 else "No planted decoy value in the arguments.",
+                                 ["canary.tripped"] if canary_hits else []))
+        rule_results = []
+        t_rules = time.perf_counter()
         for rule in self.rules:
+            t = time.perf_counter()
             try:
-                findings.extend(rule.evaluate(call, ctx, self.policy))
+                found = rule.evaluate(call, ctx, self.policy)
             except Exception as exc:  # a broken rule must fail closed, not open
-                findings.append(
-                    Finding(
-                        rule_id=rule.id + ".error",
-                        action=Action.BLOCK,
-                        severity=Severity.HIGH,
-                        message="Rule %s raised %s; failing closed."
-                                % (rule.id, type(exc).__name__),
-                        evidence={"error": str(exc)[:200]},
-                    )
-                )
+                found = [Finding(
+                    rule_id=rule.id + ".error",
+                    action=Action.BLOCK,
+                    severity=Severity.HIGH,
+                    message="Rule %s raised %s; failing closed."
+                            % (rule.id, type(exc).__name__),
+                    evidence={"error": str(exc)[:200]},
+                )]
+            findings.extend(found)
+            rule_results.append(_rule_result(rule.id, found, t))
+        stages.append(_stage(
+            "rules", _worst(f.action for f in findings), t_rules,
+            "; ".join(f.message for f in findings if f.action is not Action.ALLOW)[:600]
+            or "Every deterministic rule passed.", _ids(findings), detail=rule_results))
 
-        if self.baseline is not None and not any(f.action is Action.BLOCK for f in findings):
-            try:
-                findings.extend(self.baseline.assess(ctx.principal.id, call.tool, call.arguments,
-                                                     self.spend_of(call.tool, call.arguments),
-                                                     ctx.tainted))
-            except Exception as exc:  # the baseline is a safety layer: failing, it holds
-                findings.append(Finding("baseline.error", Action.FLAG, Severity.HIGH,
-                                        "Action baseline unavailable (%s); holding for a person."
-                                        % type(exc).__name__, {"error": str(exc)[:200]}))
+        if self.baseline is not None:
+            t = time.perf_counter()
+            if any(f.action is Action.BLOCK for f in findings):
+                stages.append({"stage": "baseline", "status": "skipped",
+                               "reason": "A rule already blocked the call."})
+            else:
+                try:
+                    found = self.baseline.assess(ctx.principal.id, call.tool, call.arguments,
+                                                 self.spend_of(call.tool, call.arguments), ctx.tainted)
+                except Exception as exc:  # the baseline is a safety layer: failing, it holds
+                    found = [Finding("baseline.error", Action.FLAG, Severity.HIGH,
+                                     "Action baseline unavailable (%s); holding for a person."
+                                     % type(exc).__name__, {"error": str(exc)[:200]})]
+                findings.extend(found)
+                applies = self.baseline.hold_when == "always" or (
+                    self.baseline.hold_when == "tainted" and ctx.tainted)
+                stages.append(_stage(
+                    "baseline", _worst(f.action for f in found) if applies else "not_applicable", t,
+                    found[0].message if found else (
+                        "Nothing new for this agent." if applies
+                        else "Session has read nothing untrusted, so first-time actions are not held."),
+                    _ids(found), evidence=found[0].evidence if found else None))
 
         risk_tier = self.policy.risk_tier(tool, call.arguments)
+        t = time.perf_counter()
         route = route_outbound(risk_tier, ctx, self._routing_view(findings))
+        stages.append(_stage("router", "escalate" if route.escalate else "skipped", t,
+                             _ROUTE_REASON.get(route.reason, route.reason),
+                             evidence={"route": route.reason, "risk_tier": risk_tier,
+                                       "tainted": ctx.tainted, "fail_closed": route.fail_closed}))
         tiers = ["t0"]
         text = arguments_text(call.arguments)
         scores: List[Tuple[str, float]] = []
+        report: List[Dict[str, Any]] = []
         if route.escalate and self.detectors and text:
             tiers.append("t1")
             findings.extend(run_detectors(self.detectors, text, route, self.policy,
-                                          "arguments:" + tool, scores=scores))
+                                          "arguments:" + tool, scores=scores, report=report))
+        stages.extend(_detector_stages(self.detectors, report, route,
+                                       has_text=bool(text), plan=None))
         case_id = None
         if self.memory is not None and route.escalate:
             tiers.append("memory")
+            t = time.perf_counter()
             assessment = self.memory.assess(
                 kind="tool_call", text=text, findings=findings, scores=scores, tool=call.tool,
                 arg_keys=sorted(call.arguments), high_risk=risk_tier == "high",
                 session=ctx.session_id, principal=ctx.principal.id,
                 excerpt=self._excerpt(json.dumps(redact(call.arguments), default=str)))
             findings, case_id = assessment.apply(findings), assessment.case_id
+            stages.append(_memory_stage(assessment, t))
+        elif self.memory is not None:
+            stages.append({"stage": "memory", "status": "skipped",
+                           "reason": "Not routed: ordinary calls are not compared with past cases."})
 
         findings = [self._apply_shadow(f) for f in findings]
         decision = Decision.from_findings(
@@ -621,7 +697,9 @@ class Firewall:
             route=route.reason,
             threat_score=threat_score(findings, scores),
             case_id=case_id,
+            stages=stages,
         )
+        decision.stages.append(_verdict_stage(decision))
         self._log("tool_call_inspected", decision, ctx,
                   {"arguments": redact(call.arguments), "risk_tier": risk_tier})
         if canary_hits:
@@ -922,7 +1000,8 @@ class Firewall:
     # --------------------------------------------------------------- internals
 
     def _run_tier1(self, text: str, route: Route, location: str, findings: List[Finding],
-                   scores: List[Tuple[str, float]], plan: Any) -> List[str]:
+                   scores: List[Tuple[str, float]], plan: Any,
+                   report: Optional[List[Dict[str, Any]]] = None) -> List[str]:
         """Run the detectors, sampling the deep ones per source. Returns the tiers that ran.
 
         Without a sampler every detector runs (the original behaviour). With
@@ -934,7 +1013,8 @@ class Firewall:
             detectors = [d for d in detectors if not getattr(d, "deep", False)]
         if not detectors:
             return []
-        found = run_detectors(detectors, text, route, self.policy, location, scores=scores)
+        found = run_detectors(detectors, text, route, self.policy, location, scores=scores,
+                              report=report)
         findings.extend(found)
         tiers = ["t1"]
         deep = {d.name for d in detectors if getattr(d, "deep", False)}
@@ -946,11 +1026,6 @@ class Firewall:
                           and f.action is not Action.ALLOW for f in found)
                 self.sampler.record(plan, flagged=hit)
         return tiers
-
-    def _arbitrate_source(self, case: Any, verdict: str) -> None:
-        """A person labelled a case: settle its source's stake (slash or clear)."""
-        if case.source and self.sampler is not None:
-            self.sampler.arbitrate(case.source, verdict == "malicious", case.reviewer or "", case.id)
 
     def _excerpt(self, text: str) -> str:
         """What a reviewer sees of the content: the head, with secrets and PII redacted."""
@@ -979,8 +1054,12 @@ class Firewall:
 
     def _log(self, event: str, decision: Decision, ctx: Context,
              extra: Dict[str, Any]) -> None:
+        record = decision.to_dict()
+        # The per-stage trace stays out of the audit chain: it is verbose, every
+        # anchored record would carry it, and the outcome it explains is already here.
+        record.pop("stages", None)
         self.audit.append(event, {
-            **decision.to_dict(),
+            **record,
             "principal": ctx.principal.id,
             "principal_roles": list(ctx.principal.roles),
             "tainted": ctx.tainted,
@@ -991,8 +1070,124 @@ class Firewall:
         })
 
 
+_ROUTE_REASON = {
+    "t0_decisive": "A deterministic rule already decided, so no AI check was needed.",
+    "high_risk_tool": "High-risk tool: AI checks run, and fail closed if they error.",
+    "tainted_session": "The session has read untrusted content, so AI checks run.",
+    "t0_ambiguous": "A rule was unsure (flagged), so AI checks run.",
+    "untrusted_content": "Untrusted content: AI checks run.",
+    "low_risk_clean": "Low-risk tool in a clean session: AI checks are not needed.",
+    "user_clean": "Text from the user with no warning signs: AI checks are not needed.",
+    "trusted_clean": "Trusted text with no warning signs: AI checks are not needed.",
+    "tool_output": "Tool output: screened before the agent reads it.",
+}
+_STATUS_RANK = {"pass": 0, "allow": 0, "hold": 1, "block": 2}
+
+
+def _stage(stage: str, status: str, t0: float, reason: str, rule_ids: Optional[List[str]] = None,
+           evidence: Any = None, detail: Any = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"stage": stage, "status": status, "reason": reason,
+                           "rule_ids": rule_ids or [], "ms": round((time.perf_counter() - t0) * 1000, 3)}
+    if evidence is not None:
+        out["evidence"] = evidence
+    if detail is not None:
+        out["detail"] = detail
+    return out
+
+
+def _worst(actions: Any) -> str:
+    worst = "pass"
+    for a in actions:
+        s = {Action.BLOCK: "block", Action.FLAG: "hold"}.get(a, "pass")
+        if _STATUS_RANK[s] > _STATUS_RANK[worst]:
+            worst = s
+    return worst
+
+
+def _ids(findings: Sequence[Finding]) -> List[str]:
+    return sorted({f.rule_id for f in findings if f.action is not Action.ALLOW})
+
+
+def _rule_result(rule_id: str, found: Sequence[Finding], t0: float) -> Dict[str, Any]:
+    return {"rule": rule_id, "status": _worst(f.action for f in found), "rule_ids": _ids(found),
+            "ms": round((time.perf_counter() - t0) * 1000, 3)}
+
+
+def _detector_stages(detectors: Sequence[Detector], report: List[Dict[str, Any]], route: Route,
+                     *, has_text: bool, plan: Any) -> List[Dict[str, Any]]:
+    """One stage per configured detector: what it actually did, from its own invocation."""
+    ran = {r["detector"]: r for r in report}
+    out = []
+    for det in detectors:
+        name, deep = det.name, bool(getattr(det, "deep", False))
+        r = ran.get(name)
+        if r is not None:
+            stage = {"stage": "detector", "detector": name, "deep": deep, **r}
+            if r["status"] == "ran":
+                stage["status"] = r["outcome"]
+                stage["reason"] = "%s scored %.2f (%s)." % (name, r["score"], r.get("label") or "")
+                if r.get("evidence", {}).get("cached"):
+                    stage["provenance"] = "cached"
+                else:
+                    stage["provenance"] = "live call" if deep else "local"
+            out.append(stage)
+        elif not route.escalate:
+            out.append({"stage": "detector", "detector": name, "deep": deep, "status": "skipped",
+                        "reason": "Not routed: " + _ROUTE_REASON.get(route.reason, route.reason)})
+        elif not has_text:
+            out.append({"stage": "detector", "detector": name, "deep": deep, "status": "not_applicable",
+                        "reason": "No text to screen."})
+        elif deep and plan is not None and not plan.sampled:
+            out.append({"stage": "detector", "detector": name, "deep": deep, "status": "skipped",
+                        "reason": "Proof of Sampling: source %s is trusted and this item was not sampled "
+                                  "(p=%.3f)." % (plan.source, plan.probability)})
+        else:
+            out.append({"stage": "detector", "detector": name, "deep": deep, "status": "skipped",
+                        "reason": "Not run."})
+    if plan is not None:
+        out.append({"stage": "sampling", "status": "pass",
+                    "reason": "Source %s is %s; deep check probability %.3f, %s."
+                              % (plan.source, plan.status, plan.probability,
+                                 "sampled" if plan.sampled else "not sampled"),
+                    "evidence": plan.view()})
+    return out
+
+
+def _memory_stage(assessment: Any, t0: float) -> Dict[str, Any]:
+    found = [f for f in assessment.findings if f.rule_id.startswith("adaptive.")]
+    lifted = sorted(assessment.lift)
+    if found:
+        f = max(found, key=lambda x: _STATUS_RANK.get(_worst([x.action]), 0))
+        status = "allow" if f.action is Action.ALLOW else _worst([f.action])
+        reason = f.message
+    else:
+        status, reason = "pass", "Nothing similar has been judged before, and no threat signal to learn from."
+    ev: Dict[str, Any] = {}
+    for f in found:
+        for k in ("case_id", "similarity", "confirmed_by", "cases", "probability", "nearest_similarity"):
+            if k in f.evidence:
+                ev[k] = f.evidence[k]
+    if assessment.case_id:
+        ev["case_opened"] = assessment.case_id
+    if lifted:
+        ev["lifted"] = lifted
+    return _stage("memory", status, t0, reason, _ids(found), evidence=ev or None)
+
+
+def _verdict_stage(decision: Decision) -> Dict[str, Any]:
+    return {"stage": "verdict", "status": decision.verdict, "reason": decision.reason,
+            "rule_ids": _ids(decision.findings), "ms": round(decision.latency_ms, 3),
+            "score": round(decision.threat_score, 4)}
+
+
 _SEVERITY_PRIOR = {Severity.CRITICAL: 0.95, Severity.HIGH: 0.85, Severity.MEDIUM: 0.6,
                    Severity.LOW: 0.3, Severity.INFO: 0.0}
+
+
+def _arbitrate_source(sampler: Any, case: Any, verdict: str) -> None:
+    """A person labelled a case: settle its source's stake (slash or clear)."""
+    if case.source:
+        sampler.arbitrate(case.source, verdict == "malicious", case.reviewer or "", case.id)
 
 
 def _is_threat(f: Finding) -> bool:

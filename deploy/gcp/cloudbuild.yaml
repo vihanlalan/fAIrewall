@@ -1,0 +1,16 @@
+# Builds the one fAIrewall image and pushes it to Artifact Registry, tagged with the version.
+#   gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+#     --substitutions=_REGION=asia-south1,_REPO=fairewall,_TAG=$(git rev-parse --short HEAD) .
+substitutions:
+  _REGION: asia-south1
+  _REPO: fairewall
+  _TAG: manual
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/fairewall:${_TAG}", "."]
+  - name: gcr.io/cloud-builders/docker
+    args: ["push", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/fairewall:${_TAG}"]
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/fairewall:${_TAG}"
+options:
+  logging: CLOUD_LOGGING_ONLY

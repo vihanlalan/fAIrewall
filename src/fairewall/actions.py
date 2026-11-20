@@ -108,7 +108,12 @@ class RegisteredAction:
 class ActionStore:
     """One SQLite database per application/policy domain, shared by its workers."""
 
-    def __init__(self, path, policy, actions, *, audit=None, detectors=(), ttl=3600):
+    def __init__(self, path, policy, actions, *, audit=None, detectors=(), ttl=3600,
+                 firewall_factory=None, on_decision=None):
+        """``firewall_factory(principal)`` builds the Firewall each decision runs on, so a host
+        can attach the full control set (memory, baseline, canaries, sampler, shared freezes).
+        ``on_decision(phase, decision, request_id, session, principal)`` sees every decision
+        where it is made: "screen", "submit", "review" (the re-check) and "output"."""
         if str(path) == ":memory:" or ttl <= 0:
             raise ValueError("Use a database file and positive approval TTL")
         self.path, self.policy, self.ttl = path, policy, ttl
@@ -125,6 +130,7 @@ class ActionStore:
             self._validators[name] = Draft202012Validator(schema, registry=Registry())
         self.actions = MappingProxyType(self.actions)
         self.audit, self.detectors = audit, detectors
+        self.firewall_factory, self.on_decision = firewall_factory, on_decision
         # Per-thread timing of the last handler call, so callers can separate
         # fAIrewall's own overhead from the time the business system took.
         self._timing = threading.local()
@@ -153,29 +159,57 @@ class ActionStore:
         scope = canonical([principal.id, session])
         row = db.execute("SELECT state FROM sessions WHERE id=?", (scope,)).fetchone()
         state = json.loads(row[0]) if row else {}
-        fw = Firewall(self.policy, audit=self.audit, detectors=self.detectors)
+        fw = (self.firewall_factory(principal) if self.firewall_factory is not None
+              else Firewall(self.policy, audit=self.audit, detectors=self.detectors))
         ctx = Context(scope, principal)
         ctx.taint_sources = state.get("taint", [])
         ctx.tainted = bool(ctx.taint_sources)
         for rule in fw.rules:
-            if isinstance(rule, (FinancialRule, VelocityRule)):
+            if isinstance(rule, (FinancialRule, VelocityRule)) or hasattr(rule, "snapshot_session"):
+                rule.reset(scope)
                 rule.restore_session(scope, state.get(rule.id))
         return fw, ctx
+
+    def _notify(self, phase, decision, request_id, session, principal):
+        if self.on_decision is not None:
+            try:
+                self.on_decision(phase, decision, request_id, session, principal)
+            except Exception:  # a trace hook must never change an enforcement outcome
+                pass
 
     def _save(self, db, fw, ctx):
         state = {"taint": ctx.taint_sources}
         for rule in fw.rules:
-            if isinstance(rule, (FinancialRule, VelocityRule)):
-                state[rule.id] = rule.snapshot_session(ctx.session_id)
+            if isinstance(rule, (FinancialRule, VelocityRule)) or hasattr(rule, "snapshot_session"):
+                snap = rule.snapshot_session(ctx.session_id)
+                if snap is not None:
+                    state[rule.id] = snap
         db.execute("INSERT INTO sessions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
                    (ctx.session_id, canonical(state)))
 
-    def screen(self, session, principal, text, source="intake"):
+    def screen(self, session, principal, text, source="intake", trust=Trust.UNTRUSTED):
+        """Screen text entering the session. Untrusted text (the default) taints it."""
         with self.transaction() as db:
             fw, ctx = self._runtime(db, session, principal)
-            decision = fw.inspect_input(text, trust=Trust.UNTRUSTED, ctx=ctx, source=source)
+            decision = fw.inspect_input(text, trust=trust, ctx=ctx, source=source)
             self._save(db, fw, ctx)
-            return decision
+        self._notify("screen", decision, None, session, principal)
+        return decision
+
+    def set_scope(self, session, principal, scope, *, widen=False, by=""):
+        """Declare a run's scope (see fairewall.rules.scope) in this store's session state."""
+        with self.transaction() as db:
+            fw, ctx = self._runtime(db, session, principal)
+            result = fw._scope_rule().set(ctx.session_id, scope, widen=widen, by=by)
+            self._save(db, fw, ctx)
+        return result
+
+    def session_state(self, session, principal):
+        """Taint and rule state of one session, as stored."""
+        with self.transaction() as db:
+            row = db.execute("SELECT state FROM sessions WHERE id=?",
+                             (canonical([principal.id, session]),)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     @staticmethod
     def _view(row):
@@ -324,6 +358,7 @@ class ActionStore:
         principal = Principal(**json.loads(row["principal"]))
         fw, ctx = self._runtime(db, row["session"], principal)
         decision = fw.inspect(tool, args, ctx=ctx)
+        self._notify("review" if reviewer else "submit", decision, request_id, row["session"], principal)
         rules = [f.rule_id for f in decision.findings]
         pin = db.execute("SELECT fingerprint FROM pins WHERE server=? AND tool=?",
                          (action.server, tool)).fetchone()
@@ -397,7 +432,8 @@ class ActionStore:
             ctx.taint(tool)
         structured = not isinstance(result, str)
         raw = canonical(result) if structured else result
-        _, screened = fw.inspect_output(tool, raw, ctx=ctx)
+        out_decision, screened = fw.inspect_output(tool, raw, ctx=ctx)
+        self._notify("output", out_decision, row["id"], row["session"], Principal(**row["principal"]))
         result = json.loads(screened) if structured else screened
         self._save(db, fw, ctx)
         db.execute("UPDATE actions SET status='executed',result=? WHERE id=?",

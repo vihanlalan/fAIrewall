@@ -1,38 +1,37 @@
 # syntax=docker/dockerfile:1
+# One image, several roles (FAIREWALL_ROLE):
+#   sdk-gateway (default)  the platform-adapter gateway (fairewall.server), as before
+#   lab                    the judge-facing Lab (python -m fairewall.lab)
+#   gateway                a policy gateway with shared state (fairewall serve --database)
+#   control                the control plane
+#   anchor                 one anchoring pass (Cloud Run job, triggered by Cloud Scheduler)
+#   migrate                create schemas and seed synthetic evidence, then exit
+# Every role listens on $PORT (Cloud Run sets it).
 FROM python:3.12-slim
 
-# ---------- system ----------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------- non-root user ----------
 RUN useradd --create-home --shell /bin/bash fairewall
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R fairewall:fairewall /app
 USER fairewall
+ENV PATH="/home/fairewall/.local/bin:${PATH}" PYTHONUNBUFFERED=1
 
-# ---------- Python deps ----------
-# Copy only the package metadata first so the layer is cached
-COPY --chown=fairewall:fairewall pyproject.toml ./
+COPY --chown=fairewall:fairewall pyproject.toml README.md ./
 COPY --chown=fairewall:fairewall src/ ./src/
+RUN pip install --no-cache-dir --user --upgrade pip \
+ && pip install --no-cache-dir --user ".[sdk,proxy,lab]"
 
-# Install the SDK + all platform adapters + the proxy/server extras
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir ".[sdk,proxy]"
+COPY --chown=fairewall:fairewall deploy/gcp/entrypoint.sh /app/entrypoint.sh
 
-# ---------- runtime ----------
-ENV FAIREWALL_HOST=0.0.0.0
-ENV FAIREWALL_PORT=8000
-ENV FAIREWALL_AUDIT_PATH=/app/data/audit.jsonl
-
-# Persistent audit log directory (/app/data, created above; mount as a volume)
+ENV FAIREWALL_ROLE=sdk-gateway \
+    FAIREWALL_HOST=0.0.0.0 \
+    PORT=8000 \
+    FAIREWALL_AUDIT_PATH=/app/data/audit.jsonl
 
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -fs "http://localhost:${PORT}/healthz" || curl -fs "http://localhost:${PORT}/health" || exit 1
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-CMD ["python", "-m", "uvicorn", "fairewall.server:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--forwarded-allow-ips", "*"]
+ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]

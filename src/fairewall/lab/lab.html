@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fAIrewall Lab</title>
+<link rel="stylesheet" href="/ui/theme.css">
+<style>
+  :root{--ok:#256240;--ok-bg:#e6f2e8;--hold:#77500b;--hold-bg:#f8edcf;--no:#a1392b;--no-bg:#f8e9e3}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--ui)}
+  .mast{background:var(--ink);color:#fff;border-bottom:5px solid var(--signal)}
+  .mast .in{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;padding:10px 24px}
+  .word{font:700 1.45rem/1 var(--ui);letter-spacing:-.02em}.word b{color:var(--signal)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{font:600 .72rem var(--mono);text-transform:uppercase;border:1px solid #63645b;padding:3px 8px;color:#e8e7dc}
+  .chip.on{border-color:var(--signal);color:var(--signal)}
+  .tabs{display:flex;border:2px solid var(--ink);margin:16px 24px 0;background:var(--sheet);width:max-content}
+  .tabs button{border:0;border-right:1px solid var(--ink);background:none;padding:10px 22px;font:700 .95rem var(--ui);cursor:pointer;min-height:44px}
+  .tabs button[aria-selected=true]{background:var(--ink);color:#fff}
+  main{padding:14px 24px 40px}
+  .layout{display:grid;grid-template-columns:270px 1fr;gap:16px;align-items:start}
+  .tourrail{border:2px solid var(--ink);background:var(--sheet)}
+  .tourrail h3,.box h3{margin:0;background:var(--ink);color:#fff;font:600 .78rem var(--mono);text-transform:uppercase;letter-spacing:.04em;padding:9px 12px}
+  .tourrail button{display:block;color:var(--ink);width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);padding:9px 12px;cursor:pointer;font:inherit;min-height:40px}
+  .tourrail button:hover{background:#f5eeba}.tourrail button[aria-current=true]{background:var(--signal);font-weight:700}
+  .tourrail .n{font:700 .8rem var(--mono);margin-right:6px}
+  .card{border:2px solid var(--ink);background:var(--sheet);padding:14px 16px;margin-bottom:14px}
+  .card h2{margin:0 0 6px;font:700 clamp(1.4rem,2.4vw,2.1rem)/1.05 var(--ui);letter-spacing:-.03em}
+  .muted{color:var(--muted)}.small{font-size:.85rem}.mono{font-family:var(--mono);font-size:.85rem}
+  .hrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .btn{border:1.5px solid var(--ink);background:var(--sheet);color:var(--ink);padding:7px 13px;font:700 .9rem var(--ui);cursor:pointer;min-height:40px}
+  .btn:hover:not(:disabled){background:#fff199;color:var(--ink)}.btn.primary,.btn.primary:hover:not(:disabled){background:var(--ink);color:#fff}.btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.ok{border-color:var(--ok);color:var(--ok)}.btn.no{border-color:var(--no);color:var(--no)}
+  .grid3{display:grid;grid-template-columns:1.05fr .95fr 1.2fr;gap:14px;align-items:start}
+  .box{border:2px solid var(--ink);background:var(--sheet);min-width:0}
+  .box .body{padding:12px;max-height:72vh;overflow:auto}
+  textarea,select,input{font:inherit;border:1px solid var(--ink);background:#fff;padding:7px 9px;min-height:40px}
+  textarea{width:100%;min-height:86px;resize:vertical}
+  .pill{display:inline-block;font:700 .7rem var(--mono);text-transform:uppercase;padding:2px 7px;border:1px solid currentColor}
+  .s-pass,.s-approve,.s-allow,.s-executed,.s-delivered,.s-refunded,.s-completed,.s-confirmed{color:var(--ok);background:var(--ok-bg)}
+  .s-hold,.s-human,.s-escalate,.s-pending_approval,.s-awaiting_approval,.s-input_held,.s-pending,.s-shadow{color:var(--hold);background:var(--hold-bg)}
+  .s-block,.s-blocked,.s-rejected,.s-input_blocked,.s-failed,.s-model_error,.s-declined{color:var(--no);background:var(--no-bg)}
+  .s-skipped,.s-not_applicable,.s-unavailable{color:var(--muted);background:var(--wash)}
+  .ev{border-top:1px solid var(--line);padding:8px 0}
+  .ev summary{cursor:pointer;list-style:none}.ev summary::-webkit-details-marker{display:none}
+  .stage{display:grid;grid-template-columns:118px 92px 1fr;gap:8px;padding:5px 0;border-top:1px dashed var(--line);font-size:.86rem}
+  .stage .rid{font:600 .76rem var(--mono);color:var(--ink);background:#fff199;padding:0 4px}
+  pre{white-space:pre-wrap;word-break:break-word;background:var(--wash);padding:8px;margin:6px 0;font:.78rem var(--mono)}
+  .note{border-left:5px solid var(--signal);background:#fffbd6;padding:8px 10px;margin:8px 0}
+  .tag{font:700 .68rem var(--mono);border:1px solid var(--ink);padding:1px 5px;text-transform:uppercase}
+  .tag.live{background:var(--signal)}.tag.rec{background:var(--wash)}
+  table{border-collapse:collapse;width:100%;font-size:.86rem}th,td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
+  .sub{display:flex;flex-wrap:wrap;border:2px solid var(--ink);background:var(--sheet);margin-bottom:12px;width:max-content;max-width:100%}
+  .sub button{border:0;border-right:1px solid var(--ink);background:none;padding:8px 14px;cursor:pointer;font:600 .88rem var(--ui);min-height:40px}
+  .sub button[aria-current=true]{background:var(--signal)}
+  [hidden]{display:none!important}
+  :focus-visible{outline:3px solid #5255c8;outline-offset:1px}
+  @media(max-width:1180px){.grid3{grid-template-columns:1fr}.box .body{max-height:none}}
+  @media(max-width:760px){.layout{grid-template-columns:1fr}.tabs{margin:12px}main{padding:10px 12px 30px}.stage{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header class="mast"><div class="in">
+  <div class="word">f<b>AI</b>rewall <span style="font-weight:500">Lab</span></div>
+  <div class="chips" id="chips"></div>
+  <div class="hrow"><span class="chip" id="wsid">no sandbox</span><button class="btn" id="reset" title="Start a fresh sandbox (anchored evidence is kept)">New sandbox</button></div>
+</div></header>
+
+<div class="tabs" role="tablist" aria-label="Lab views">
+  <button role="tab" id="tab-demo" aria-selected="true" aria-controls="demo">Demo</button>
+  <button role="tab" id="tab-console" aria-selected="false" aria-controls="console">Console</button>
+</div>
+
+<main>
+<section id="demo" role="tabpanel" aria-labelledby="tab-demo">
+  <div class="layout">
+    <nav class="tourrail" aria-label="Tour">
+      <h3>Guided tour</h3><div id="tour"></div>
+      <h3>Explore</h3>
+      <button data-view="free">Free play</button>
+      <button data-view="checks">All checks</button>
+      <button data-view="limits">Honest limits</button>
+    </nav>
+    <div>
+      <div class="card" id="chapter-card"></div>
+      <div class="grid3">
+        <section class="box" aria-label="Agent chat"><h3>Agent chat</h3><div class="body" id="chat"></div></section>
+        <section class="box" aria-label="Reviewer inbox"><h3>Reviewer inbox</h3><div class="body" id="inbox"></div></section>
+        <section class="box" aria-label="What fAIrewall did"><h3>What fAIrewall did</h3><div class="body" id="trace"></div></section>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="console" role="tabpanel" aria-labelledby="tab-console" hidden>
+  <div class="sub" role="tablist" aria-label="Console sections">
+    <button data-c="review" aria-current="true">Approvals &amp; learning</button>
+    <button data-c="audit">Audit timeline</button>
+    <button data-c="fleet">Fleet</button>
+    <button data-c="policy">Policy comparison</button>
+    <button data-c="evidence">Evidence</button>
+  </div>
+  <div id="cbody"></div>
+</section>
+</main>
+
+<script>
+(() => {
+const $ = s => document.querySelector(s), esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store = {get(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+let tokens = store.get("fwlab.tokens"), meta = null, status = null, place = store.get("fwlab.place") || {view:"ch", ch:1};
+let currentRun = null, consoleSec = "review", polling = null;
+const pill = (s, txt) => `<span class="pill s-${esc(s)}">${esc(txt ?? s)}</span>`;
+const rupees = p => p == null ? "" : "₹" + (p/100).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
+
+async function api(path, opts = {}, role = "propose") {
+  const t = tokens ? (role === "review" ? tokens.review_token : tokens.propose_token) : "";
+  const r = await fetch(path, {...opts, headers: {"Content-Type":"application/json", ...(t ? {Authorization:"Bearer "+t} : {})}});
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
+  return body;
+}
+async function ensureSandbox(fresh) {
+  if (!tokens || fresh) { tokens = await api("/api/workspaces", {method:"POST"}); store.set("fwlab.tokens", tokens); currentRun = null; }
+  $("#wsid").textContent = "sandbox " + tokens.workspace;
+}
+
+function renderChips() {
+  const c = [];
+  c.push(`<span class="chip ${status.gemini ? "on" : ""}">Gemini: ${esc(status.gemini || "recorded only")}</span>`);
+  c.push(`<span class="chip ${status.model_armor ? "on" : ""}">Model Armor: ${status.model_armor ? "live" : "not configured"}</span>`);
+  c.push(`<span class="chip">Policy ${esc(status.policy.version)} · ${esc(status.policy.fingerprint.slice(0,12))}</span>`);
+  c.push(`<span class="chip">${esc(status.environment)}</span>`);
+  $("#chips").innerHTML = c.join("");
+}
+
+// ------------------------------------------------------------ routing
+function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
+function route() {
+  const h = location.hash.replace(/^#\/?/, "").split("/");
+  const tab = h[0] === "console" ? "console" : "demo";
+  $("#tab-demo").setAttribute("aria-selected", tab === "demo"); $("#tab-console").setAttribute("aria-selected", tab === "console");
+  $("#demo").hidden = tab !== "demo"; $("#console").hidden = tab !== "console";
+  if (tab === "demo") {
+    if (h[1] === "ch" && h[2]) place = {view:"ch", ch:+h[2]};
+    else if (["free","checks","limits"].includes(h[1])) place = {view:h[1]};
+    const ri = h.indexOf("run"); if (ri > 0 && h[ri+1]) currentRun = h[ri+1];
+    store.set("fwlab.place", place); renderDemo();
+  } else { if (h[1]) consoleSec = h[1]; renderConsole(); }
+}
+$("#tab-demo").onclick = () => go("#/demo/" + (place.view === "ch" ? "ch/" + place.ch : place.view) + (currentRun ? "/run/" + currentRun : ""));
+$("#tab-console").onclick = () => go("#/console/" + consoleSec);
+document.querySelector('[role=tablist]').addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { const other = document.activeElement.id === "tab-demo" ? "#tab-console" : "#tab-demo"; $(other).focus(); $(other).click(); }
+});
+window.addEventListener("hashchange", route);
+window.addEventListener("storage", e => { if (e.key === "fwlab.tokens") { tokens = store.get("fwlab.tokens"); route(); } });
+
+// --------------------------------------------------------------- demo
+function renderTour() {
+  $("#tour").innerHTML = meta.chapters.map(c => `<button data-ch="${c.id}" aria-current="${place.view==="ch" && place.ch===c.id}"><span class="n">${c.id}</span>${esc(c.title)}</button>`).join("");
+  $("#tour").querySelectorAll("button").forEach(b => b.onclick = () => { currentRun = null; go("#/demo/ch/" + b.dataset.ch); });
+  document.querySelectorAll(".tourrail [data-view]").forEach(b => { b.setAttribute("aria-current", place.view === b.dataset.view); b.onclick = () => { currentRun = null; go("#/demo/" + b.dataset.view); }; });
+}
+function sourcePicker() {
+  return `<label class="small">Proposals by <select id="src"><option value="recorded">Recorded script (labelled)</option>${status.gemini ? `<option value="live">Live Gemini (${esc(status.gemini_model||"")})</option>` : ""}</select></label>`;
+}
+function renderDemo() {
+  renderTour();
+  const card = $("#chapter-card");
+  if (place.view === "ch") {
+    const c = meta.chapters.find(x => x.id === place.ch) || meta.chapters[0];
+    let extra = "";
+    if (c.scope) extra += `<div class="note"><b>Run scope set by the backend before the agent starts:</b> <span class="mono">${esc(JSON.stringify(c.scope))}</span> (max spend in rupees)</div>`;
+    if (c.input) extra += `<div class="small muted">Input: <b>${esc(c.input.kind)}</b>${c.input.fixture ? " fixture <span class='mono'>" + esc(c.input.fixture) + "</span>" : ""}${c.input.text ? " — “" + esc(c.input.text) + "”" : ""}</div>`;
+    const runBtns = c.input ? `<button class="btn primary" id="run-ch">Run chapter ${c.id}</button>${c.has_variant ? `<button class="btn" id="run-var">Variant: ${esc(c.variant_label)}</button>` : ""}${sourcePicker()}` : "";
+    let special = "";
+    if (c.id === 5) special = `<div class="hrow" style="margin-top:8px"><button class="btn" data-fix="courier-weak-variant">Send the reworded copy</button><button class="btn" data-fix="courier-benign">Send the harmless control</button><span class="small muted">Label the case in the inbox first.</span></div>`;
+    if (c.id === 8) special = `<div class="hrow" style="margin-top:8px"><button class="btn primary" id="freeze">Freeze my agent</button><button class="btn" id="unfreeze">Release</button></div><div id="ch-out"></div>`;
+    if (c.id === 9) special = `<div class="hrow" style="margin-top:8px"><button class="btn primary" id="evid">Show evidence</button><button class="btn" id="tamper">Tamper with a copy</button></div><div id="ch-out"></div>`;
+    if (c.id === 10) special = `<div class="hrow" style="margin-top:8px"><label class="small">Candidate per-refund cap ₹ <input id="cap" type="number" value="2000" min="0" style="width:110px"></label><label class="small">Auto band up to ₹ <input id="band" type="number" value="500" min="0" style="width:100px"></label><button class="btn primary" id="cmp">Compare in shadow</button><button class="btn" id="promote">Promote</button><button class="btn" id="rollback">Roll back</button></div><div id="ch-out"></div>`;
+    card.innerHTML = `<div class="small mono">Chapter ${c.id} of 10</div><h2>${esc(c.title)}</h2><p class="muted" style="margin:0 0 8px">${esc(c.teaches)}</p>${extra}<div class="hrow" style="margin-top:8px">${runBtns}</div>${special}
+      <details style="margin-top:10px"><summary class="small"><b>The SDK behind this chapter</b></summary><pre>${esc(c.sdk)}</pre></details>`;
+    const src = () => ($("#src") || {}).value || "recorded";
+    if ($("#run-ch")) $("#run-ch").onclick = () => startRun({chapter:c.id, source:src()});
+    if ($("#run-var")) $("#run-var").onclick = () => startRun({chapter:c.id, variant:true, source:src()});
+    card.querySelectorAll("[data-fix]").forEach(b => b.onclick = () => startRun({kind:"website", fixture:b.dataset.fix, source:src()}));
+    if ($("#freeze")) $("#freeze").onclick = freezeFlow;
+    if ($("#unfreeze")) $("#unfreeze").onclick = async () => { const r = await guard(() => api("/api/killswitch/unfreeze", {method:"POST"}, "review")); if (r) $("#ch-out").innerHTML = `<div class="note">Released: ${esc(r.released)}</div>`; };
+    if ($("#evid")) $("#evid").onclick = () => evidenceView($("#ch-out"));
+    if ($("#tamper")) $("#tamper").onclick = tamperView;
+    if ($("#cmp")) $("#cmp").onclick = compareView;
+    if ($("#promote")) $("#promote").onclick = () => rolloutSet("promote");
+    if ($("#rollback")) $("#rollback").onclick = () => rolloutSet("rollback");
+  } else if (place.view === "free") {
+    card.innerHTML = `<h2>Free play</h2><p class="muted">Your text is untrusted input unless you send it as the operator. Only synthetic orders, registered tools and sandbox destinations exist here: nothing is emailed, paid or browsed for real.</p>
+      <div class="hrow"><select id="fkind"><option value="operator">Operator instruction (trusted)</option><option value="email">Customer email (untrusted)</option><option value="website">Web page (untrusted)</option><option value="transcript">Call transcript (untrusted)</option></select>${sourcePicker()}</div>
+      <textarea id="ftext" maxlength="2000" placeholder="e.g. Customer on ORD-1002 wants Rs 600 back for a broken fan"></textarea><div class="hrow"><button class="btn primary" id="fsend">Send</button><span class="small muted">Recorded mode uses a labelled keyword script (it only proposes a lookup and a refund); live Gemini reads your text.</span></div>`;
+    $("#fsend").onclick = () => startRun({kind: $("#fkind").value === "operator" ? "operator" : $("#fkind").value, text: $("#ftext").value, source: ($("#src")||{}).value || "recorded"});
+  } else if (place.view === "checks") {
+    card.innerHTML = `<h2>All checks</h2><p class="muted">Each check sends scripted proposals through the same governed path. It passes only if the <b>named rule</b> fired and the sandbox effect matches.</p><div class="hrow" style="margin-bottom:8px"><button class="btn primary" id="runall">Run every check</button></div><table><thead><tr><th>Check</th><th>Expected rule</th><th>Result</th></tr></thead><tbody>${meta.checks.map(v => `<tr><td>${esc(v.title)}</td><td class="mono">${esc(v.rule)}</td><td id="chk-${v.id}"><button class="btn" data-chk="${v.id}">Run</button></td></tr>`).join("")}</tbody></table>`;
+    card.querySelectorAll("[data-chk]").forEach(b => b.onclick = () => runCheck(b.dataset.chk));
+    $("#runall").onclick = async () => { for (const v of meta.checks) await runCheck(v.id); };
+  } else if (place.view === "limits") {
+    card.innerHTML = `<h2>Honest limits</h2><div id="lim">Loading…</div>`;
+    api("/api/limits").then(l => {
+      const m = Object.entries(l.measured).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${typeof v === "object" ? (v.n ? `n=${v.n} · p50 ${v.p50} · p95 ${v.p95} · max ${v.max}` : "no samples yet") : esc(v)}</td></tr>`).join("");
+      $("#lim").innerHTML = `<p class="small muted">Measured from this deployment's own traces (environment: <b>${esc(l.environment)}</b>). Policy time includes any detector called during the decision.</p><table>${m}</table><h3 style="font:700 1.1rem var(--ui);margin:14px 0 6px">What each layer cannot do</h3><table>${l.limits.map(x => `<tr><td><b>${esc(x.layer)}</b></td><td>${esc(x.limit)}</td></tr>`).join("")}</table>`;
+    });
+  }
+  renderChat(); renderInbox();
+}
+
+async function guard(fn) { try { return await fn(); } catch (e) { toast(e.message); return null; } }
+function toast(msg) { const n = document.createElement("div"); n.className = "note"; n.setAttribute("role", "alert"); n.textContent = msg; $("#chapter-card").prepend(n); setTimeout(() => n.remove(), 6000); }
+
+async function startRun(body) {
+  const r = await guard(() => api("/api/runs", {method:"POST", body:JSON.stringify(body)}));
+  if (r) { currentRun = r.run_id; lastRun = r; go("#/demo/" + (place.view === "ch" ? "ch/" + place.ch : place.view) + "/run/" + r.run_id); }
+}
+let lastRun = null;
+async function loadRun() {
+  if (!currentRun) { lastRun = null; return null; }
+  lastRun = await guard(() => api("/api/runs/" + currentRun)); return lastRun;
+}
+async function renderChat() {
+  const run = await loadRun(), el = $("#chat");
+  if (!run) { el.innerHTML = `<p class="muted">Run a chapter or send something in Free play. What reached the agent, what it proposed, and what the sandbox received appear here.</p>`; renderTrace(); return; }
+  const a = run.agent, src = run.proposal_source;
+  let h = `<div class="hrow"><b>Run</b> <span class="mono">${esc(run.run_id)}</span>${pill(run.status)}</div>`;
+  h += `<div class="small">Input from <b>${esc(run.input.source.split("|").pop())}</b> (${esc(run.input.kind)})${run.session.tainted ? ' · <span class="pill s-hold">session tainted</span>' : ""}${run.session.frozen ? ' · <span class="pill s-block">frozen</span>' : ""}</div><pre>${esc(run.input.excerpt)}</pre>`;
+  if (run.status === "input_blocked") h += `<div class="note"><b>Blocked at the door.</b> This text never reached the agent.</div>`;
+  if (run.status === "input_held") h += `<div class="note"><b>Held for a person.</b> The agent has not seen it. Case <span class="mono">${esc(run.detail.case_id)}</span> is in the reviewer inbox.</div>`;
+  if (a) {
+    h += `<div class="small">Proposals by <span class="tag ${a.source === "live" ? "live" : "rec"}">${a.source === "live" ? "Gemini · " + esc(a.model) : "recorded script"}</span> ${a.model_latency_ms && a.source === "live" ? `· Gemini ${a.model_latency_ms} ms` : ""} · fAIrewall decisions ${Math.round(run.trace.filter(e => ["screen","submit","review","output"].includes(e.event)).reduce((t, e) => t + (e.ms || 0), 0) * 100) / 100} ms (measured)</div>`;
+    for (const x of a.actions) {
+      const eff = [...run.effects.refunds.filter(r => r.idem_key === x.action_id).map(r => `Ledger receipt <b class="mono">${esc(r.receipt)}</b> · ${esc(r.amount_display)}`),
+                   ...run.effects.outbox.filter(m => m.idem_key === x.action_id).map(m => `Sandbox inbox <b>${esc(m.recipient)}</b> received <span class="mono">${esc(m.message_id)}</span>`)];
+      h += `<div class="ev"><div class="hrow"><span class="mono"><b>${esc(x.tool)}</b>(${esc(JSON.stringify(x.arguments))})</span>${pill(x.status)}</div>${x.amount_display ? `<div class="small">${esc(x.amount_display)}</div>` : ""}<div class="small muted">action <span class="mono">${esc(x.action_id)}</span>${x.reason_codes.length ? " · " + x.reason_codes.map(r => `<span class="mono">${esc(r)}</span>`).join(", ") : ""}</div><div class="small">${eff.length ? eff.join("<br>") : `<span class="muted">Sandbox received nothing for this action.</span>`}</div></div>`;
+    }
+    if (a.final_text) h += `<div class="ev"><b>Agent:</b> ${esc(a.final_text)}</div>`;
+    if (a.error) h += `<div class="note">Model: ${esc(a.error.kind)} — ${esc(a.error.message || "")}</div>`;
+  }
+  if (run.status === "model_error" && run.detail.error) h += `<div class="note">Model unavailable: ${esc(run.detail.error)}. Nothing was dispatched.</div>`;
+  el.innerHTML = h;
+  renderTrace();
+}
+async function renderInbox() {
+  const el = $("#inbox"); const box = await guard(() => api("/api/inbox", {}, "review")); if (!box) return;
+  let h = `<div class="small muted">Acting as the simulated reviewer for this sandbox.</div>`;
+  h += box.actions.length ? "" : `<p class="muted small">No held actions.</p>`;
+  for (const x of box.actions) h += `<div class="ev"><div class="hrow"><b>${esc(x.tool)}</b>${pill("pending","held")}${x.amount_display ? `<span>${esc(x.amount_display)}</span>` : ""}</div><div class="small">Source: ${esc(x.source)} · run <span class="mono">${esc(x.run_id.slice(0,24))}</span></div><div class="small">Why: ${x.reasons.map(r => `<span class="mono">${esc(r)}</span>`).join(", ")}</div><pre>${esc(JSON.stringify(x.arguments))}</pre><div class="small muted">Expires ${new Date(x.expires_at*1000).toLocaleTimeString()}</div><div class="hrow"><button class="btn ok" data-rev="${esc(x.action_id)}" data-ok="1">Approve</button><button class="btn no" data-rev="${esc(x.action_id)}" data-ok="0">Reject</button></div></div>`;
+  const pendingCases = box.cases.filter(c => c.status === "pending"), done = box.cases.filter(c => c.status !== "pending").slice(0, 6);
+  h += `<h4 style="margin:12px 0 4px">Learning cases</h4>` + (pendingCases.length ? "" : `<p class="muted small">No case waiting.</p>`);
+  for (const c of pendingCases) h += `<div class="ev"><div class="hrow"><span class="mono">${esc(c.case_id)}</span>${pill("pending")}</div><div class="small">From ${esc((c.source||"").split("|").pop())} · ${c.rule_ids.map(r => `<span class="mono">${esc(r)}</span>`).join(", ")}</div><pre>${esc(c.excerpt)}</pre><div class="hrow"><button class="btn no" data-lab="${esc(c.case_id)}" data-v="malicious">Malicious</button><button class="btn ok" data-lab="${esc(c.case_id)}" data-v="benign">Benign</button></div></div>`;
+  for (const c of done) h += `<div class="ev small"><span class="mono">${esc(c.case_id)}</span> ${pill(c.status === "labeled" ? (c.label === "malicious" ? "block" : "pass") : "skipped", c.label || c.status)} ${c.status === "labeled" ? `<button class="btn" data-rvk="${esc(c.case_id)}">Revoke label</button>` : ""}</div>`;
+  el.innerHTML = h;
+  el.querySelectorAll("[data-rev]").forEach(b => b.onclick = async () => { b.disabled = true; const r = await guard(() => api(`/api/actions/${b.dataset.rev}/review`, {method:"POST", body:JSON.stringify({approve: b.dataset.ok === "1"})}, "review")); if (r) { if (r.already_decided) toast("Already decided by another reviewer: " + r.action.status); refreshAll(); } });
+  el.querySelectorAll("[data-lab]").forEach(b => b.onclick = async () => { const r = await guard(() => api(`/api/cases/${b.dataset.lab}/label`, {method:"POST", body:JSON.stringify({verdict: b.dataset.v})}, "review")); if (r) refreshAll(); });
+  el.querySelectorAll("[data-rvk]").forEach(b => b.onclick = async () => { const r = await guard(() => api(`/api/cases/${b.dataset.rvk}/revoke`, {method:"POST"}, "review")); if (r) refreshAll(); });
+}
+const STAGE_NAMES = {kill_switch:"Kill switch", canary:"Canaries", rules:"Rules", baseline:"Action baseline", router:"Router", detector:"Detector", sampling:"Proof of Sampling", memory:"Threat memory", verdict:"Verdict", provenance:"Provenance"};
+function stageRow(s) {
+  const name = s.stage === "detector" ? (s.detector === "model_armor" ? "Model Armor" : "Detector: " + s.detector) : (STAGE_NAMES[s.stage] || s.stage);
+  let extra = "";
+  if (s.score != null) extra += ` <span class="mono">score ${esc(s.score)}</span>`;
+  if (s.provenance) extra += ` <span class="tag">${esc(s.provenance)}</span>`;
+  if (s.ms != null) extra += ` <span class="small muted">${esc(s.ms)} ms</span>`;
+  const ids = (s.rule_ids || []).map(r => `<span class="rid">${esc(r)}</span>`).join(" ");
+  let ev = "";
+  if (s.detector === "model_armor" && s.evidence) ev = `<pre>Model Armor raw filters: ${esc(JSON.stringify(s.evidence.filters || {}))}${s.evidence.matched ? "\nmatched: " + esc(JSON.stringify(s.evidence.matched)) : ""}\nfAIrewall score: ${esc(s.score)}</pre>`;
+  else if (s.evidence && (s.stage === "memory" || s.stage === "baseline" || s.stage === "sampling")) ev = `<pre>${esc(JSON.stringify(s.evidence))}</pre>`;
+  if (s.detail) ev += `<details><summary class="small">Each rule</summary>${s.detail.map(d => `<div class="small mono">${esc(d.rule)} ${pill(d.status)} ${esc(d.ms)} ms ${esc((d.rule_ids||[]).join(", "))}</div>`).join("")}</details>`;
+  return `<div class="stage"><div><b>${esc(name)}</b></div><div>${pill(s.status)}</div><div>${esc(s.reason || "")}${extra}${ids ? "<br>" + ids : ""}${ev}</div></div>`;
+}
+async function renderTrace() {
+  const el = $("#trace");
+  if (!lastRun) { el.innerHTML = `<p class="muted">Each check appears here as it happened, in order. Nothing is redrawn after the fact: scores and Model Armor results are the ones recorded during the decision.</p>`; return; }
+  const evs = lastRun.trace;
+  el.innerHTML = `<div class="small muted">Policy ${esc(lastRun.policy.version)} · ${esc(lastRun.policy.fingerprint.slice(0,16))}</div>` + evs.map(e => {
+    const label = {screen:"Inbound screening", submit:"Proposed action", review:"Re-check on approval", reviewer_decision:"Reviewer decision", output:"Tool output screening", dispatch:"Dispatch to sandbox", proposal:"Agent proposal", scope_set:"Run scope set", label:"Reviewer label", gateway_check:"Gateway check"}[e.event] || e.event;
+    const head = `<div class="hrow"><b>${esc(label)}</b>${pill(e.outcome)}${e.action_id ? `<span class="mono small">${esc(e.action_id.slice(0,12))}</span>` : ""}${e.ms != null ? `<span class="small muted">${Math.round(e.ms*100)/100} ms</span>` : ""}<span class="small muted">${esc(e.gateway)}</span></div>`;
+    const body = (e.stages || []).map(stageRow).join("") + (e.event === "dispatch" || e.event === "proposal" || e.event === "scope_set" ? `<pre>${esc(JSON.stringify(e.evidence))}</pre>` : "");
+    return `<details class="ev" ${e.stages && e.stages.length ? "open" : ""}><summary>${head}</summary>${body}</details>`;
+  }).join("");
+}
+async function runCheck(id) {
+  const cell = $("#chk-" + id); if (cell) cell.textContent = "running…";
+  const r = await guard(() => api("/api/checks/" + id, {method:"POST"}));
+  if (r && cell) cell.innerHTML = `${pill(r.passed ? "pass" : "block", r.passed ? "pass" : "fail")} <span class="small">fired: ${r.fired.map(x => `<span class="mono">${esc(x)}</span>`).join(", ") || "none"} · sandbox writes ${r.writes}/${r.expected_writes}</span> <a href="#/demo/checks/run/${esc(r.run_id)}">trace</a>`;
+}
+async function freezeFlow() {
+  $("#ch-out").innerHTML = "Freezing and checking both gateways…";
+  const r = await guard(() => api("/api/killswitch/freeze", {method:"POST", body:JSON.stringify({scope:"principal"})}, "review")); if (!r) return;
+  $("#ch-out").innerHTML = `<table><tr><th>Gateway</th><th>Mode</th><th>Observed</th><th>After</th><th>Rule</th></tr>${r.gateways.map(g => `<tr><td>${esc(g.gateway)}</td><td class="small">${esc(g.mode)}</td><td>${pill(g.observed ? "block" : "pass", g.observed ? "refused" : "not yet")}</td><td>${esc(g.propagation_ms)} ms</td><td class="mono">${esc(g.rule_ids.join(", "))}</td></tr>`).join("")}</table>
+    <div class="small">Governed dispatch after the freeze: ${pill(r.governed_dispatch.status)} ${esc(r.governed_dispatch.rule_ids.join(", "))} · dispatched: ${esc(r.governed_dispatch.dispatched)}</div>
+    <div class="small"><b>Already dispatched before the freeze (not recalled):</b> ${r.already_dispatched.length ? r.already_dispatched.map(a => `<span class="mono">${esc(a.tool)} ${esc(a.action_id.slice(0,10))}</span>`).join(", ") : "none"}</div>`;
+}
+async function evidenceView(target) {
+  const r = await guard(() => api("/api/evidence")); if (!r) return;
+  const p = r.synthetic_proof;
+  target.innerHTML = p ? `<div class="small">Pre-anchored synthetic record #${p.seq} in batch ${p.batch} of ${p.size} records. Proof check: ${pill(r.proof_check.valid ? "pass" : "block", r.proof_check.valid ? "valid" : "invalid")}</div>
+    <pre>record: ${esc(JSON.stringify(p.record))}\nroot: ${esc(p.root)}\ncommitment: ${esc(p.commitment)}\npath: ${esc(JSON.stringify(p.path))}</pre>
+    <div class="small">Published: ${r.published.map(b => `${esc(b.backend)} ${pill(b.status === "confirmed" ? "pass" : "pending", b.status)} ${b.link ? `<a href="${esc(b.link)}" target="_blank" rel="noopener">BaseScan</a>` : ""}`).join(" · ") || "no external backend configured (local file copy only)"}</div>
+    <h4 style="margin:10px 0 4px">Your sandbox's own records</h4>${r.fresh.length ? `<table>${r.fresh.map(f => `<tr><td class="mono">${esc(f.log_id)}#${f.seq}</td><td>${esc(f.event)}</td><td>${pill(f.anchored ? "pass" : "pending", f.anchored ? "anchored" : "pending next anchor")}</td></tr>`).join("")}</table>` : `<p class="muted small">Run a chapter first.</p>`}` : `<div class="note">${esc(r.error)}</div>`;
+}
+async function tamperView() {
+  const r = await guard(() => api("/api/evidence/tamper", {method:"POST"})); if (!r) return;
+  $("#ch-out").innerHTML = `<div class="small">Changed <span class="mono">${esc(r.changed_field)}</span> in a disposable copy.</div><table><tr><td>Original</td><td>${pill(r.original.valid ? "pass" : "block", r.original.valid ? "valid" : "invalid")}</td><td class="small">${esc(r.original.detail)}</td></tr><tr><td>Tampered copy</td><td>${pill(r.tampered_copy.valid ? "pass" : "block", r.tampered_copy.valid ? "valid" : "invalid")}</td><td class="small">${esc(r.tampered_copy.detail)}</td></tr></table>`;
+}
+async function compareView() {
+  const body = {max_spend_per_transaction: +$("#cap").value, review_above: +$("#band").value};
+  const r = await guard(() => api("/api/rollout/compare", {method:"POST", body:JSON.stringify(body)}, "review")); if (!r) return;
+  const d = r.diff, ex = d.examples || [];
+  $("#ch-out").innerHTML = `<div class="small">Active (still enforcing): <span class="mono">${esc(r.enforcing.version)} · ${esc(r.enforcing.fingerprint.slice(0,12))}</span> · Candidate v${esc(r.candidate.version)} <span class="mono">${esc(r.candidate.fingerprint.slice(0,12))}</span> in shadow</div>
+    <div class="small">Replayed ${esc(r.history.records)} calls (${esc(r.history.source)}): <b>${esc(d.changed)}</b> change, ${esc(d.stricter)} stricter, ${esc(d.looser)} looser.</div>
+    <table>${ex.slice(0,10).map(x => `<tr><td class="mono small">${esc(x.tool)} ${esc(JSON.stringify(x.arguments || {}))}</td><td>${esc(x.old)} → ${esc(x.new)} ${pill(x.direction === "stricter" ? "hold" : "block", x.direction)}</td><td class="mono small">${esc([...(x.rules_added||[]).map(r => "+" + r), ...(x.rules_removed||[]).map(r => "-" + r)].join(", "))}</td></tr>`).join("")}</table>
+    <div class="small">Observed by: ${r.observed.map(o => `${esc(o.gateway)} v${esc(o.version)}${o.shadow ? " (shadow)" : ""}`).join(", ")}</div>`;
+}
+async function rolloutSet(action) {
+  const r = await guard(() => api("/api/rollout/" + action, {method:"POST"}, "review")); if (!r) return;
+  $("#ch-out").innerHTML = `<div class="note">${esc(action)}: environment <span class="mono">${esc(r.environment.name)}</span> now ${r.environment.shadow ? "shadow" : "enforcing"} v${esc(r.environment.version)}. Enforcing policy: <span class="mono">${esc(r.enforcing.version)} · ${esc(r.enforcing.fingerprint.slice(0,12))}</span>. Observed: ${r.observed.map(o => esc(o.gateway) + " v" + esc(o.version)).join(", ")}</div>`;
+}
+
+// ------------------------------------------------------------- console
+async function renderConsole() {
+  document.querySelectorAll("#console .sub button").forEach(b => { b.setAttribute("aria-current", b.dataset.c === consoleSec); b.onclick = () => go("#/console/" + b.dataset.c); });
+  const el = $("#cbody");
+  if (consoleSec === "review") {
+    el.innerHTML = `<div class="grid3" style="grid-template-columns:1fr 1fr"><section class="box"><h3>Approvals &amp; learning</h3><div class="body" id="inbox"></div></section><section class="box"><h3>Runs</h3><div class="body" id="runlist"></div></section></div>`;
+    renderInbox();
+    const r = await guard(() => api("/api/runs", {}, "review"));
+    if (r) $("#runlist").innerHTML = `<table>${r.runs.map(x => `<tr><td><a href="#/demo/${x.chapter && !String(x.chapter).startsWith("check") ? "ch/" + parseInt(x.chapter) : "free"}/run/${esc(x.id)}" class="mono">${esc(x.id)}</a></td><td>${esc(x.chapter)}</td><td>${pill(x.status)}</td><td><span class="tag ${x.proposal_source === "live" ? "live" : "rec"}">${esc(x.proposal_source)}</span></td></tr>`).join("")}</table>`;
+  } else if (consoleSec === "audit") {
+    el.innerHTML = `<div class="hrow" style="margin-bottom:8px"><input id="f-run" placeholder="run id"><input id="f-act" placeholder="action id"><select id="f-out"><option value="">any verdict</option><option>approve</option><option>human</option><option>block</option></select><input id="f-rule" placeholder="rule id contains"><input id="f-gw" placeholder="gateway"><button class="btn" id="f-go">Filter</button></div><div class="box"><div class="body" id="audit"></div></div>`;
+    const load = async () => {
+      const q = new URLSearchParams({run: $("#f-run").value, action: $("#f-act").value});
+      const r = await guard(() => api("/api/trace?" + q, {}, "review")); if (!r) return;
+      const out = $("#f-out").value, rule = $("#f-rule").value, gw = $("#f-gw").value;
+      const rows = r.events.filter(e => (!out || e.outcome === out) && (!rule || e.rule_ids.some(x => x.includes(rule))) && (!gw || e.gateway.includes(gw))).reverse();
+      $("#audit").innerHTML = `<table><tr><th>When</th><th>Event</th><th>Outcome</th><th>Rules</th><th>Run / action</th><th>Gateway</th><th>Policy</th></tr>${rows.map(e => `<tr><td class="small">${new Date(e.at*1000).toLocaleTimeString()}</td><td>${esc(e.event)}</td><td>${pill(e.outcome)}</td><td class="mono small">${esc(e.rule_ids.join(", "))}</td><td class="mono small">${e.run_id ? `<a href="#/demo/free/run/${esc(e.run_id)}">${esc(e.run_id)}</a>` : ""} ${esc(e.action_id.slice(0,12))}</td><td class="small">${esc(e.gateway)}</td><td class="mono small">${esc(e.policy)}</td></tr>`).join("")}</table>`;
+    };
+    $("#f-go").onclick = load; load();
+  } else if (consoleSec === "fleet") {
+    const r = await guard(() => api("/api/fleet", {}, "review")); if (!r) return;
+    el.innerHTML = `<div class="box"><h3>Gateways</h3><div class="body"><table><tr><th>Gateway</th><th>Mode</th><th>Active policy</th><th>Observed deployment</th><th>Freeze observed</th></tr>${r.gateways.map(g => `<tr><td><b>${esc(g.gateway)}</b></td><td class="small">${esc(g.mode)}</td><td class="mono small">${esc(g.active_policy.version)} · ${esc(g.active_policy.fingerprint.slice(0,12))}</td><td class="small">${g.observed_deployment.version ? `v${esc(g.observed_deployment.version)} ${g.observed_deployment.shadow ? "(shadow)" : "(enforcing)"} at ${new Date(g.observed_deployment.observed_at*1000).toLocaleTimeString()}` : "none (base policy)"}</td><td>${pill(g.freeze_observed ? "block" : "pass", g.freeze_observed ? "frozen" : "no freeze")}</td></tr>`).join("")}</table></div></div>`;
+  } else if (consoleSec === "policy") {
+    el.innerHTML = `<div class="card"><h2>Policy comparison</h2><p class="muted">Same as chapter 10, here for operators.</p><div class="hrow"><label class="small">Per-refund cap ₹ <input id="cap" type="number" value="2000" style="width:110px"></label><label class="small">Auto band ₹ <input id="band" type="number" value="500" style="width:100px"></label><button class="btn primary" id="cmp">Compare in shadow</button><button class="btn" id="promote">Promote</button><button class="btn" id="rollback">Roll back</button></div><div id="ch-out"></div></div>`;
+    $("#cmp").onclick = compareView; $("#promote").onclick = () => rolloutSet("promote"); $("#rollback").onclick = () => rolloutSet("rollback");
+  } else if (consoleSec === "evidence") {
+    el.innerHTML = `<div class="card"><h2>Evidence</h2><div class="hrow"><button class="btn" id="tamper">Tamper with a copy</button></div><div id="ch-out"></div><div id="ev2"></div></div>`;
+    $("#tamper").onclick = tamperView; evidenceView($("#ev2"));
+  }
+}
+
+function refreshAll() { if (!$("#demo").hidden) { renderChat(); renderInbox(); } else renderConsole(); }
+
+(async function init() {
+  try {
+    status = await api("/api/status"); meta = await api("/api/chapters"); renderChips();
+    await ensureSandbox(false);
+    try { await api("/api/runs"); } catch (e) { await ensureSandbox(true); }
+  } catch (e) { document.querySelector("main").innerHTML = `<div class="card">Could not start the Lab: ${esc(e.message)}</div>`; return; }
+  $("#reset").onclick = async () => { await ensureSandbox(true); currentRun = null; lastRun = null; go("#/demo/ch/1"); };
+  if (!location.hash) location.hash = "#/demo/ch/" + (place.ch || 1);
+  route();
+  polling = setInterval(() => { if (document.visibilityState === "visible" && currentRun) refreshAll(); }, 4000);
+})();
+})();
+</script>
+</body>
+</html>

@@ -71,6 +71,7 @@ def run_detectors(
     policy: Policy,
     location: str,
     scores: Optional[List[Tuple[str, float]]] = None,
+    report: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Finding]:
     """Score text with each detector, stopping at the first block.
 
@@ -79,11 +80,22 @@ def run_detectors(
     """
     findings: List[Finding] = []
     text = text[:MAX_DETECTOR_CHARS]
+    stopped = False
     for det in detectors:
+        if stopped:
+            if report is not None:
+                report.append({"detector": det.name, "deep": bool(getattr(det, "deep", False)),
+                               "status": "skipped", "reason": "An earlier detector already blocked."})
+            continue
         started = time.perf_counter()
         try:
             result = det.detect(text)
         except Exception as exc:
+            if report is not None:
+                report.append({"detector": det.name, "deep": bool(getattr(det, "deep", False)),
+                               "status": "failed", "reason": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                               "ms": round((time.perf_counter() - started) * 1000, 3),
+                               "outcome": "block" if route.fail_closed else "hold"})
             findings.append(Finding(
                 rule_id=f"detector.{det.name}.error",
                 action=Action.BLOCK if route.fail_closed else Action.FLAG,
@@ -93,12 +105,19 @@ def run_detectors(
                 evidence={"error": str(exc)[:200], "route": route.reason, "location": location},
             ))
             if route.fail_closed:
-                break
+                stopped = True
             continue
 
         score = min(1.0, max(0.0, float(result.score)))
         if scores is not None:
             scores.append((det.name, score))
+        if report is not None:
+            outcome = ("block" if score >= policy.detector_block_threshold else
+                       "hold" if score >= policy.detector_flag_threshold else "pass")
+            report.append({"detector": det.name, "deep": bool(getattr(det, "deep", False)),
+                           "status": "ran", "score": round(score, 4), "label": result.label,
+                           "outcome": outcome, "evidence": dict(result.evidence),
+                           "ms": round((time.perf_counter() - started) * 1000, 3)})
         if score >= policy.detector_block_threshold:
             action, severity, threshold = Action.BLOCK, Severity.HIGH, policy.detector_block_threshold
         elif score >= policy.detector_flag_threshold:
@@ -122,5 +141,5 @@ def run_detectors(
             },
         ))
         if action is Action.BLOCK:
-            break
+            stopped = True
     return findings

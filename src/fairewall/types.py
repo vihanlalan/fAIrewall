@@ -138,6 +138,11 @@ class Decision:
     threat_score: float = 0.0
     # The learning case opened for this event, when a person must decide.
     case_id: Optional[str] = None
+    # What each stage of the check did, recorded where it ran (kill switch,
+    # rules, router, each detector, memory, ...). Each entry: stage, status
+    # (pass | block | hold | skipped | not_applicable | unavailable | failed),
+    # reason, rule_ids, ms, and score/evidence when the stage produced them.
+    stages: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def allowed(self) -> bool:
@@ -191,6 +196,7 @@ class Decision:
             "latency_ms": round(self.latency_ms, 3),
             "tiers": list(self.tiers),
             "route": self.route,
+            "stages": list(self.stages),
             "findings": [
                 {
                     "rule_id": f.rule_id,

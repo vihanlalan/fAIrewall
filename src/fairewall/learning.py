@@ -276,6 +276,18 @@ class Assessment:
         return out + self.findings
 
 
+def _add_ns_column(db: Any, table: str) -> None:
+    """Databases created before namespaces existed get the column (empty = shared)."""
+    with db.transaction() as tx:
+        cols = ([r["name"] for r in tx.execute("PRAGMA table_info(%s)" % table)]
+                if db.dialect == "sqlite" else
+                [r["column_name"] for r in tx.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=?",
+                    (db.schema, table))])
+        if "ns" not in cols:
+            tx.execute("ALTER TABLE %s ADD COLUMN ns TEXT NOT NULL DEFAULT ''" % table)
+
+
 class LearningError(ValueError):
     """A label or revocation the memory refuses."""
 
@@ -288,7 +300,7 @@ CREATE TABLE IF NOT EXISTS cases (
     principal TEXT NOT NULL DEFAULT '', session TEXT NOT NULL DEFAULT '',
     excerpt TEXT NOT NULL DEFAULT '', signals TEXT NOT NULL DEFAULT '{}',
     label TEXT, reviewer TEXT, note TEXT NOT NULL DEFAULT '', labeled_at REAL,
-    via TEXT NOT NULL DEFAULT '');
+    via TEXT NOT NULL DEFAULT '', ns TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS cases_by_status ON cases (status, created);
 CREATE INDEX IF NOT EXISTS cases_by_digest ON cases (digest, status);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)
@@ -342,12 +354,17 @@ class ThreatMemory:
     """Cases, labels, the exemplar index and the model. Thread-safe; shareable across instances."""
 
     def __init__(self, target: Any, *, config: Optional[LearningConfig] = None,
-                 audit: Any = None, clock: Callable[[], float] = time.time) -> None:
+                 audit: Any = None, clock: Callable[[], float] = time.time,
+                 namespace: str = "") -> None:
+        """``namespace`` isolates cases and labels (e.g. one workspace per Lab visitor):
+        a memory only sees, matches against and labels cases in its own namespace."""
         self.config = config or LearningConfig()
+        self.ns = namespace
         self.audit = audit
         self._clock = clock
         self.db = Database(target, schema="fairewall_learning")
         self.db.create(_SCHEMA)
+        _add_ns_column(self.db, "cases")
         self._lock = threading.RLock()
         self._index = _Index([])
         self._model = LinearModel()
@@ -478,18 +495,18 @@ class ThreatMemory:
         digest = self._digest(kind, text, tool, source, arg_keys)
         now = self._clock()
         with self.db.transaction() as db:
-            row = db.execute("SELECT id FROM cases WHERE digest=? AND status='pending'",
-                             (digest,)).fetchone()
+            row = db.execute("SELECT id FROM cases WHERE digest=? AND status='pending' AND ns=?",
+                             (digest, self.ns)).fetchone()
             if row:
                 return row["id"]
             case_id = "case_" + uuid.uuid4().hex[:16]
             db.execute(
                 "INSERT INTO cases (id, kind, status, created, digest, vector, rule_ids, source, tool,"
-                " principal, session, excerpt, signals) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " principal, session, excerpt, signals, ns) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (case_id, kind, "pending", now, digest,
                  json.dumps({str(k): round(v, 6) for k, v in vec.items()}),
                  json.dumps(rule_ids), source[:200], tool[:200], principal[:200], session[:200],
-                 excerpt[: self.config.excerpt_chars], json.dumps(signals)))
+                 excerpt[: self.config.excerpt_chars], json.dumps(signals), self.ns))
             self._prune(db, now)
         self._audit("learning_case_opened", {"case_id": case_id, "kind": kind, "tool": tool,
                                              "source": source, "rule_ids": rule_ids,
@@ -499,10 +516,11 @@ class ThreatMemory:
     def _prune(self, db: Any, now: float) -> None:
         db.execute("UPDATE cases SET status='expired' WHERE status='pending' AND created<?",
                    (now - self.config.pending_ttl_s,))
-        n = db.execute("SELECT COUNT(*) FROM cases WHERE status='pending'").fetchone()[0]
+        n = db.execute("SELECT COUNT(*) FROM cases WHERE status='pending' AND ns=?", (self.ns,)).fetchone()[0]
         if n > self.config.max_pending:
             db.execute("UPDATE cases SET status='expired' WHERE id IN (SELECT id FROM cases"
-                       " WHERE status='pending' ORDER BY created LIMIT ?)", (n - self.config.max_pending,))
+                       " WHERE status='pending' AND ns=? ORDER BY created LIMIT ?)",
+                       (self.ns, n - self.config.max_pending))
 
     def label(self, case_id: str, verdict: str, reviewer: str, note: str = "",
               via: str = "review") -> Dict[str, Any]:
@@ -515,7 +533,7 @@ class ThreatMemory:
             raise LearningError("A reviewer is required, so the audit log shows who taught fAIrewall.")
         now = self._clock()
         with self.db.transaction() as db:
-            row = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            row = db.execute("SELECT * FROM cases WHERE id=? AND ns=?", (case_id, self.ns)).fetchone()
             if row is None:
                 raise LearningError("No case %s." % case_id)
             if row["status"] != "pending":
@@ -545,7 +563,7 @@ class ThreatMemory:
         if not reviewer:
             raise LearningError("A reviewer is required.")
         with self.db.transaction() as db:
-            row = db.execute("SELECT status FROM cases WHERE id=?", (case_id,)).fetchone()
+            row = db.execute("SELECT status FROM cases WHERE id=? AND ns=?", (case_id, self.ns)).fetchone()
             if row is None or row["status"] != "labeled":
                 raise LearningError("Only a labelled case can be revoked.")
             db.execute("UPDATE cases SET status='revoked', note=? WHERE id=?",
@@ -558,15 +576,15 @@ class ThreatMemory:
 
     def get(self, case_id: str) -> Case:
         with self.db.transaction() as db:
-            row = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            row = db.execute("SELECT * FROM cases WHERE id=? AND ns=?", (case_id, self.ns)).fetchone()
         if row is None:
             raise LearningError("No case %s." % case_id)
         return self._case(row)
 
     def cases(self, status: Optional[str] = "pending", limit: int = 100) -> List[Dict[str, Any]]:
-        sql, args = "SELECT * FROM cases", []
+        sql, args = "SELECT * FROM cases WHERE ns=?", [self.ns]
         if status:
-            sql += " WHERE status=?"
+            sql += " AND status=?"
             args.append(status)
         sql += " ORDER BY created DESC LIMIT ?"
         args.append(max(1, min(int(limit), 1000)))
@@ -576,7 +594,8 @@ class ThreatMemory:
 
     def stats(self) -> Dict[str, Any]:
         with self.db.transaction() as db:
-            rows = list(db.execute("SELECT status, label, COUNT(*) AS n FROM cases GROUP BY status, label"))
+            rows = list(db.execute("SELECT status, label, COUNT(*) AS n FROM cases WHERE ns=?"
+                                   " GROUP BY status, label", (self.ns,)))
         counts: Dict[str, int] = {}
         for r in rows:
             key = r["status"] + (":" + r["label"] if r["label"] else "")
@@ -621,8 +640,8 @@ class ThreatMemory:
                 if generation == self._generation and not force:
                     return
                 rows = list(db.execute(
-                    "SELECT * FROM cases WHERE status='labeled' ORDER BY labeled_at DESC LIMIT ?",
-                    (self.config.max_cases,)))
+                    "SELECT * FROM cases WHERE status='labeled' AND ns=? ORDER BY labeled_at DESC LIMIT ?",
+                    (self.ns, self.config.max_cases)))
             cases = [self._case(r) for r in rows]
             model = LinearModel().fit([(_top(c.vector, 400), 1 if c.label == "malicious" else 0)
                                        for c in sorted(cases, key=lambda c: c.id)])

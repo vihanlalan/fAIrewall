@@ -48,7 +48,8 @@ _SCHEMA = AUDIT_SCHEMA + """;
 CREATE TABLE IF NOT EXISTS anchors (
     batch INTEGER PRIMARY KEY, created REAL NOT NULL, root TEXT NOT NULL, prev TEXT NOT NULL,
     commitment TEXT NOT NULL, size INTEGER NOT NULL, ranges TEXT NOT NULL,
-    status TEXT NOT NULL, receipts TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '');
+    status TEXT NOT NULL, receipts TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+    lease REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS anchor_progress (
     log_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL, last_hash TEXT NOT NULL)
 """
@@ -359,10 +360,23 @@ class Anchorer:
 
     # --------------------------------------------------------------- publish
 
-    def publish(self) -> List[Dict[str, Any]]:
-        """Send every batch not yet on every backend. Failures are kept and retried next time."""
+    def _claim(self, batch: int, lease_s: float) -> bool:
+        """Lease a batch for publishing, so overlapping or retried jobs never post it twice."""
+        now = self._clock()
+        with self.db.transaction() as db:
+            cur = db.execute("UPDATE anchors SET lease=? WHERE batch=? AND status != 'anchored' AND lease < ?",
+                             (now + lease_s, batch, now))
+            return cur.rowcount == 1
+
+    def publish(self, lease_s: float = 300.0) -> List[Dict[str, Any]]:
+        """Send every batch not yet on every backend. Failures are kept and retried next time.
+
+        Each batch is leased first: a second job running at the same time skips it.
+        """
         done = []
         for anchor in self.anchors(status_not="anchored"):
+            if not self._claim(anchor["batch"], lease_s):
+                continue
             receipts, errors = dict(anchor["receipts"]), []
             leaves = None
             for backend in self.backends:
@@ -375,7 +389,7 @@ class Anchorer:
                     errors.append("%s: %s" % (backend.name, exc))
             status = "anchored" if all(b.name in receipts for b in self.backends) else "sealed"
             with self.db.transaction() as db:
-                db.execute("UPDATE anchors SET receipts=?, status=?, error=? WHERE batch=?",
+                db.execute("UPDATE anchors SET receipts=?, status=?, error=?, lease=0 WHERE batch=?",
                            (json.dumps(receipts), status, "; ".join(errors)[:1000], anchor["batch"]))
             anchor.update(receipts=receipts, status=status, error="; ".join(errors))
             if self.audit is not None and status == "anchored":
@@ -418,6 +432,7 @@ class Anchorer:
     @staticmethod
     def _anchor(row: Any) -> Dict[str, Any]:
         out = dict(row)
+        out.pop("lease", None)
         out["ranges"] = json.loads(out["ranges"])
         out["receipts"] = json.loads(out["receipts"] or "{}")
         return out

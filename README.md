@@ -164,6 +164,26 @@ Each policy argument is a file or a preset name (`ZAPIER_SME`, ...). Example cal
 
 ---
 
+## 🧪 The fAIrewall Lab (for judges)
+
+One link where a judge runs a support agent (Gemini on Vertex AI, or a clearly labelled recorded script) and watches fAIrewall allow, hold or block each action, then checks what the sandbox shop actually received. Ten chapters, free play, every rule under **All checks**, and an **Honest limits** page measured from the deployment's own traces. Each judge gets an isolated sandbox with separate propose and review capabilities.
+
+```bash
+pip install -e ".[lab]"
+python -m fairewall.lab --port 8080        # local: recorded agent, no Google credentials needed
+```
+
+On Google Cloud (Vertex AI Gemini, Model Armor, Cloud Run, Cloud SQL, Cloud Scheduler, Cloud Storage, Secret Manager):
+
+```bash
+PROJECT_ID=your-project ./deploy/gcp/deploy.sh
+LAB_URL=https://... ./deploy/gcp/smoke.sh
+```
+
+See [deploy/gcp/README.md](deploy/gcp/README.md).
+
+---
+
 ## 🗺️ What Is This? (One Paragraph)
 
 fAIrewall is a Python SDK that puts a **deterministic security layer** around AI agents. Before an agent can send an email, process a payment, approve an invoice, or write to a database — fAIrewall checks it against a policy: *Is the session tainted? Is the amount over the ceiling? Does this tool require human approval?* The decision is made in **<1 ms**, with no LLM calls, and every decision is written to a tamper-evident audit log. It ships with ready-made policy presets for five of the most popular enterprise AI platforms.
