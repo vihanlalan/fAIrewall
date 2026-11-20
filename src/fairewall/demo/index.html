@@ -217,10 +217,10 @@
       </div>
       <div class="apparatus">
         <div class="plate"><b>Signal inspection</b><span id="scope-state">Standby</span></div>
-        <div class="scope-window" role="region" tabindex="0" aria-label="Scrollable policy gate diagram" aria-describedby="scope-help">
+        <div role="group" aria-label="Policy gate diagram" aria-describedby="scope-help">
           <canvas id="scope" aria-label="Animated diagram of a tool request passing through policy gates">Use the Request, Policy, and Verdict controls for a text description.</canvas>
         </div>
-        <p class="scope-help" id="scope-help">Scroll horizontally to follow the signal path.</p>
+        <p class="scope-help" id="scope-help">Scroll down for the next stage or up for the previous one. You can also choose a stage below.</p>
         <div class="switches" aria-label="Inspect a checkpoint stage"><button data-stage="0" aria-pressed="true">Request</button><button data-stage="1" aria-pressed="false">Policy</button><button data-stage="2" aria-pressed="false">Verdict</button></div>
         <div id="instrument" aria-live="polite"></div>
       </div>
@@ -464,7 +464,9 @@
   function focusHeading(id) { $(id).focus(); }
   let signal = null;
   const stageButtons = [...document.querySelectorAll(".switches button")];
+  let activeStage = 0;
   function inspectStage(index) {
+    activeStage = index;
     stageButtons.forEach((button,i)=>button.setAttribute("aria-pressed",String(i===index)));
     $("instrument").textContent = (signal?.labels || ["Awaiting a tool proposal","Check tool access, trust and limits","Run a scenario to see its verdict"])[index];
     $("scope-state").textContent = signal ? LABEL[signal.verdict] : "Standby";
@@ -472,6 +474,24 @@
     window.checkpoint.update(index, signal?.verdict || "", signal?.id || "");
   }
   stageButtons.forEach((button,i)=>button.onclick=()=>inspectStage(i));
+  let lastWheelTime = -Infinity;
+  let lastDirection = 0;
+  document.querySelector(".apparatus").addEventListener("wheel", event => {
+    if (event.ctrlKey || !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const direction = Math.sign(event.deltaY);
+    const next = activeStage + direction;
+    const now = performance.now();
+    const continuing = direction === lastDirection && now - lastWheelTime < 160;
+    lastWheelTime = now;
+    lastDirection = direction;
+    // Keep trackpad momentum from skipping stages. A fresh scroll at either end moves the page.
+    if (!continuing && (next < 0 || next >= stageButtons.length)) {
+      lastDirection = 0;
+      return;
+    }
+    event.preventDefault();
+    if (!continuing) inspectStage(next);
+  }, {passive:false});
   inspectStage(0);
   function renderWalk(data) {
     const refund = data.calls.find(c=>c.approval_id) || data.calls[0];

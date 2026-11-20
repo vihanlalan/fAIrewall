@@ -52,14 +52,6 @@
   .rail nav a { min-height: 44px; align-content: center; }
 }
 
-/* Keep the stage controls stationary while the diagram pans. */
-.scope-window {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-color: var(--signal) #34342c;
-  background: #21221e;
-}
-.scope-window #scope { width: max(100%, 850px); }
 .scope-help {
   margin: 0;
   padding: 6px 17px;
@@ -67,7 +59,6 @@
   color: #dddccf;
   font-size: .8rem;
 }
-.scope-window:focus-visible { outline: 2px dashed var(--signal); outline-offset: -4px; }
 .mast nav { gap: clamp(12px, 2vw, 28px); }
 .mast nav a { white-space: nowrap; }
 .product-section, .contact-section {
@@ -115,7 +106,7 @@
   .mast-end { grid-column: 2; grid-row: 1; }
 }
 @media (max-width: 680px) {
-  .scope-window #scope { width: max(100%, 700px); height: 195px; }
+  #scope { height: 195px; }
   .product-intro, .product-flow, .contact-section { grid-template-columns: 1fr; }
   .product-flow div + div { border-inline-start: 0; }
   .contact-section .button { justify-self: start; }
