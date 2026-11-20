@@ -21,14 +21,15 @@ def test_page_and_scenarios_load(client):
     page = client.get("/demo")
     assert page.status_code == 200 and "fAIrewall" in page.text
     ids = [s["id"] for s in client.get("/demo/api/scenarios").json()["scenarios"]]
-    assert ids == ["invoice", "contract", "hijack", "key_leak", "loop", "refunds"]
+    assert ids == ["invoice", "contract", "hijack", "key_leak", "disguised", "roleplay", "loop", "refunds"]
     assert client.post("/demo/api/run/nope").status_code == 404
 
 
 def test_invoice_is_allowed_and_runs(client):
     r = run(client, "invoice")
     assert r["calls"][0]["verdict"] == "allow"
-    assert r["calls"][0]["outcome"] == "ran (simulated)"
+    assert "ran (simulated)" in r["calls"][0]["outcome"]
+    assert all(c["status"] in ("pass", "skipped") for c in r["calls"][0]["checks"])
 
 
 def test_contract_escalates_into_queue(client):
@@ -53,6 +54,44 @@ def test_key_leak_is_blocked_by_egress(client):
     call = r["calls"][0]
     assert call["verdict"] == "block"
     assert "egress.secret_material" in {f["rule_id"] for f in call["findings"]}
+
+
+def _check(rows, key):
+    return next(r for r in rows if r["key"] == key)
+
+
+def test_trace_lists_every_check_with_plain_reasons(client):
+    r = run(client, "hijack")
+    keys = [c["key"] for c in r["calls"][0]["checks"]]
+    assert keys == ["schema", "taint", "financial", "velocity", "payload", "egress", "ai"]
+    call = r["calls"][0]["checks"]
+    assert _check(call, "taint")["status"] == "block"
+    assert _check(call, "financial")["status"] == "block"
+    assert _check(call, "velocity")["status"] == "pass"
+    # Rules already decided, so the AI tier is skipped and says why.
+    assert _check(call, "ai")["status"] == "skipped"
+    assert "already decided" in _check(call, "ai")["detail"]
+    assert r["without"] and r["story"]
+
+
+def test_roleplay_is_caught_by_ai_tier_not_patterns(client):
+    r = run(client, "roleplay")
+    checks = r["inbound"]["checks"]
+    assert _check(checks, "phrases")["status"] == "pass"
+    ai = _check(checks, "ai")
+    assert ai["status"] == "escalate" and ai["score"] >= 0.5
+    assert r["inbound"]["verdict"] == "escalate"
+    assert r["calls"][0]["verdict"] == "block"  # taint lock still stops the send
+
+
+def test_disguised_theft_slips_past_text_checks_but_taint_holds(client):
+    r = run(client, "disguised")
+    checks = r["inbound"]["checks"]
+    assert _check(checks, "phrases")["status"] == "pass"
+    assert _check(checks, "ai")["status"] == "pass"  # the model misses it; we show that
+    call = r["calls"][0]
+    assert call["verdict"] == "block"
+    assert _check(call["checks"], "taint")["status"] == "block"
 
 
 def test_loop_hits_rate_limit(client):

@@ -44,6 +44,20 @@ _SECRETS: List[Tuple[str, re.Pattern, Severity]] = [
 _CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
 
 
+def redact_secrets(text: str) -> Tuple[str, List[str]]:
+    """Replace every credential-shaped string with ``[REDACTED:<type>]``.
+
+    Returns the redacted text and the secret types found. Used on tool *output*,
+    so a key a tool happens to return never reaches the model's context.
+    """
+    found: List[str] = []
+    for name, pattern, _severity in _SECRETS:
+        text, n = pattern.subn("[REDACTED:%s]" % name, text)
+        if n:
+            found.append(name)
+    return text, found
+
+
 def _luhn_valid(number: str) -> bool:
     """Return True if *number* (digits only) satisfies the Luhn checksum.
 
@@ -174,7 +188,10 @@ class EgressRule(Rule):
     def _check_bulk_pii(self, path: str, text: str) -> List[Finding]:
         findings = []
         for name, pattern, threshold in _PII:
-            hits = len(set(pattern.findall(text)))
+            # Count whole matches. findall() would return only the capture group,
+            # so the email pattern counted distinct *domains*: a dump of 1,000
+            # gmail.com addresses scored 1 and never tripped the threshold.
+            hits = len({m.group(0).lower() for m in pattern.finditer(text)})
             if hits >= threshold:
                 findings.append(
                     Finding(

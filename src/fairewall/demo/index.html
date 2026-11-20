@@ -97,6 +97,41 @@
   .findings code { color: var(--blue); font-family: var(--mono); font-size: 13px; }
   .outcome { font-size: 14px; }
   .outcome.block { color: var(--block); } .outcome.allow { color: var(--allow); } .outcome.escalate { color: var(--escalate); }
+  /* Pipeline explainer */
+  .pipeline { display: flex; align-items: stretch; gap: 0; margin: 0 0 24px; flex-wrap: wrap; }
+  .pipe { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; flex: 1 1 160px; }
+  .pipe.fw { background: var(--blue-soft); border-color: var(--blue); flex: 2 1 320px; }
+  .pipe b { display: block; font-size: 14px; }
+  .pipe span { color: var(--muted); font-size: 12.5px; }
+  .arrow { align-self: center; color: var(--muted); padding: 0 8px; font-size: 18px; }
+
+  /* Story + compare */
+  .story { font-size: 16px; margin: 0 0 14px; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .side { border-radius: 10px; padding: 12px 14px; border: 1px solid var(--line); }
+  .side.without { background: rgba(148,163,184,.06); }
+  .side.with.allow { background: var(--allow-soft); border-color: var(--allow); }
+  .side.with.escalate { background: var(--escalate-soft); border-color: var(--escalate); }
+  .side.with.block { background: var(--block-soft); border-color: var(--block); }
+  .side .label { margin-bottom: 6px; }
+
+  /* Checks list */
+  .checks { margin: 6px 0 0; padding: 0; list-style: none; }
+  .checks li { display: grid; grid-template-columns: 26px 210px 1fr; gap: 10px; align-items: start; padding: 9px 0; border-top: 1px solid var(--line); }
+  .ico { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; }
+  .ico.pass { background: var(--allow-soft); color: var(--allow); }
+  .ico.block { background: var(--block); color: #1f0505; }
+  .ico.escalate { background: var(--escalate); color: #1a1300; }
+  .ico.skipped { background: rgba(148,163,184,.15); color: var(--muted); }
+  .ico.info { background: var(--blue-soft); color: var(--blue); }
+  .cname b { display: block; font-size: 14px; }
+  .cname span { color: var(--muted); font-size: 12px; }
+  .cdetail { font-size: 14px; }
+  .cdetail.pass, .cdetail.skipped { color: var(--muted); }
+  .cdetail.block { color: #fecaca; } .cdetail.escalate { color: #fde68a; }
+  .ai-tag { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .1em; color: var(--blue); border: 1px solid var(--blue); border-radius: 4px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
+  .summary-line { font-size: 13.5px; color: var(--muted); margin: 10px 0 0; }
+
   .squares { display: grid; grid-template-columns: repeat(15, 1fr); gap: 6px; margin: 12px 0; max-width: 520px; }
   .sq { aspect-ratio: 1; border-radius: 4px; }
   .sq.allow { background: var(--allow); } .sq.block { background: var(--block); } .sq.escalate { background: var(--escalate); }
@@ -147,7 +182,13 @@
   footer { color: var(--muted); font-size: 12.5px; text-align: center; padding: 0 32px 28px; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 
+  @media (max-width: 1100px) {
+    .checks li { grid-template-columns: 26px 1fr; }
+    .checks li .cdetail { grid-column: 2; }
+  }
   @media (max-width: 900px) {
+    .compare { grid-template-columns: 1fr; }
+    .pipeline .arrow { display: none; }
     header, nav, main { padding-left: 16px; padding-right: 16px; }
     .attack-grid, .report-grid, .two { grid-template-columns: 1fr; }
     .squares { grid-template-columns: repeat(10, 1fr); }
@@ -178,7 +219,16 @@
   <!-- 1 Live attacks -->
   <section id="tab-attacks">
     <h2>Every action gets a verdict before it runs</h2>
-    <p class="lead">Pick a situation. The agent's tool call goes through the real fAIrewall engine and comes back as allow, escalate or block, with the rule that decided it.</p>
+    <p class="lead">Pick a situation on the left. You will see what the agent tried to do, every check fAIrewall ran on it, and what would have happened without fAIrewall. All results come from the real engine.</p>
+    <div class="pipeline" aria-label="Where fAIrewall sits">
+      <div class="pipe"><b>Message comes in</b><span>email, chat, web page</span></div>
+      <div class="arrow">&rarr;</div>
+      <div class="pipe"><b>AI agent decides</b><span>e.g. wire_transfer($5,000)</span></div>
+      <div class="arrow">&rarr;</div>
+      <div class="pipe fw"><b>fAIrewall checks the call</b><span>6 fixed rules on every call, in well under a millisecond. An AI check only on risky ones. Strictest result wins.</span></div>
+      <div class="arrow">&rarr;</div>
+      <div class="pipe"><b>Tool runs, waits or is refused</b><span>payments, email, CRM</span></div>
+    </div>
     <div class="attack-grid">
       <div class="scenarios" id="scenario-list"></div>
       <div id="stage"><div class="empty">Choose a scenario on the left to run it.</div></div>
@@ -294,45 +344,69 @@
     });
   });
 
-  function findingsList(fs) {
-    if (!fs.length) return '<p class="small muted">No rule fired.</p>';
-    return '<ul class="findings">' + fs.map(function (f) {
-      return "<li><code>" + esc(f.rule_id) + "</code> &nbsp;" + esc(f.message) + "</li>";
+  var ICON = { pass: "&#10003;", block: "&#10005;", escalate: "!", skipped: "&ndash;", info: "i" };
+  function checksList(rows) {
+    return '<ul class="checks">' + rows.map(function (c) {
+      return '<li><span class="ico ' + c.status + '" aria-label="' + c.status + '">' + ICON[c.status] + "</span>" +
+        '<div class="cname"><b>' + esc(c.name) + (c.key === "ai" ? '<span class="ai-tag">AI</span>' : "") + "</b><span>" + esc(c.asks) + "</span></div>" +
+        '<div class="cdetail ' + c.status + '">' + esc(c.detail) + "</div></li>";
     }).join("") + "</ul>";
   }
+  function tally(rows) {
+    var stopped = rows.filter(function (c) { return c.status === "block" || c.status === "escalate"; }).length;
+    var ran = rows.filter(function (c) { return c.status !== "skipped" && c.status !== "info"; }).length;
+    return '<p class="summary-line">' + ran + " checks ran" + (stopped ? ", " + stopped + " raised a problem. The strictest result wins." : ", all passed.") + "</p>";
+  }
   function outcomeLine(c) {
-    var extra = c.approval_id ? ' &middot; <button class="link" data-goto="approvals">Open the approval queue</button>' : "";
-    return '<div class="outcome ' + c.verdict + '">' + esc(c.outcome) + extra + '</div>';
+    var extra = c.approval_id ? ' <button class="link" data-goto="approvals">Open the approval queue &rarr;</button>' : "";
+    return '<div class="outcome ' + c.verdict + '">' + esc(c.outcome) + extra + "</div>";
+  }
+  function overall(r) {
+    var v = { allow: 0, escalate: 1, block: 2 }, worst = "allow";
+    r.calls.forEach(function (c) { if (v[c.verdict] > v[worst]) worst = c.verdict; });
+    if (r.calls.length > 3) {
+      return { verdict: "block", text: r.counts.allow + " calls ran, then fAIrewall refused the other " + r.counts.block + "." };
+    }
+    if (r.calls.length > 1) {
+      return { verdict: worst, text: "Both refunds wait for a person. Approve both in the queue and see what happens." };
+    }
+    return { verdict: r.calls[0].verdict, text: r.calls[0].outcome };
   }
 
   function runScenario(id) {
     var stage = $("stage");
     stage.innerHTML = '<div class="empty">Running&hellip;</div>';
     api("/demo/api/run/" + encodeURIComponent(id), {}).then(function (r) {
+      var o = overall(r);
       var html = '<div class="stage">';
+      html += '<div class="step card"><p class="story">' + esc(r.story) + '</p><div class="compare">' +
+        '<div class="side without"><div class="label">Without fAIrewall</div>' + esc(r.without) + "</div>" +
+        '<div class="side with ' + o.verdict + '"><div class="label">With fAIrewall</div>' + pill(o.verdict) + " &nbsp;" + esc(o.text) + "</div></div></div>";
       var n = 1;
       if (r.inbound) {
-        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Inbound email &middot; untrusted</div>" +
+        html += '<div class="step card"><div class="label">Step ' + (n++) + " &middot; A message arrives from outside</div>" +
           '<div class="email">' + esc(r.inbound.text) + "</div>" +
-          '<div class="verdict-row"><span class="small muted">Screening:</span>' + pill(r.inbound.verdict) +
-          (r.inbound.tainted ? '<span class="status pending">Session tainted</span>' : "") + "</div>" +
-          findingsList(r.inbound.findings) + "</div>";
+          '<div class="label" style="margin-top:12px">fAIrewall screens the message</div>' + checksList(r.inbound.checks) + "</div>";
       }
       if (r.calls.length > 3) {
         var c0 = r.calls[0], firstBlock = r.calls.filter(function (c) { return c.verdict === "block"; })[0];
-        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Agent tool calls</div>" +
-          '<div class="call">' + esc(callText(c0.tool, c0.arguments)) + '  <span class="muted">&times; ' + r.calls.length + " in a few milliseconds</span></div></div>";
-        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Verdicts</div>" +
+        html += '<div class="step card"><div class="label">Step ' + (n++) + " &middot; The agent acts</div>" +
+          '<div class="call">' + esc(callText(c0.tool, c0.arguments)) + '  <span class="muted">&times; ' + r.calls.length + " in a few milliseconds</span></div>" +
           '<div class="squares">' + r.calls.map(function (c) { return '<div class="sq ' + c.verdict + '" title="' + LABEL[c.verdict] + '"></div>'; }).join("") + "</div>" +
-          '<div class="verdict-row">' + pill("allow") + " " + r.counts.allow + " ran &nbsp; " + pill("block") + " " + r.counts.block + " refused</div>" +
-          (firstBlock ? findingsList(firstBlock.findings) : "") + "</div>";
+          '<div class="verdict-row">' + pill("allow") + " " + r.counts.allow + " ran &nbsp; " + pill("block") + " " + r.counts.block + " refused</div></div>";
+        if (firstBlock) {
+          html += '<div class="step card"><div class="label">Step ' + (n++) + " &middot; fAIrewall checks call " + (r.counts.allow + 1) + " (the first one refused)</div>" +
+            checksList(firstBlock.checks) + tally(firstBlock.checks) + "</div>";
+        }
       } else {
         r.calls.forEach(function (c, i) {
-          html += '<div class="step card"><div class="label">' + (n++) + " &middot; Agent tool call" + (r.calls.length > 1 ? " " + (i + 1) : "") + "</div>" +
+          var label = r.calls.length > 1 ? "The agent acts (call " + (i + 1) + " of " + r.calls.length + ")" : "The agent acts";
+          html += '<div class="step card"><div class="label">Step ' + (n++) + " &middot; " + label + "</div>" +
             '<div class="call">' + esc(callText(c.tool, c.arguments)) + "</div>" +
+            '<div class="label" style="margin-top:14px">fAIrewall checks the call before it runs</div>' +
+            checksList(c.checks) + tally(c.checks) +
             '<div class="verdict-row" style="margin-top:14px">' + pill(c.verdict, true) +
-            '<span class="small muted">decided in ' + c.latency_ms + " ms</span></div>" +
-            findingsList(c.findings) + outcomeLine(c) + "</div>";
+            '<span class="small muted">decided in ' + c.latency_ms + " ms</span></div>" + outcomeLine(c) + "</div>";
         });
       }
       stage.innerHTML = html + "</div>";

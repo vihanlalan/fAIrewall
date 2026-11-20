@@ -41,6 +41,12 @@ class InspectToolPayload(BaseModel):
     hold_for_approval: bool = False
 
 
+class InspectOutputPayload(BaseModel):
+    tool: str
+    output: str
+    session_id: Optional[str] = None
+
+
 class ReviewPayload(BaseModel):
     reviewer: str
     note: str = ""
@@ -230,6 +236,24 @@ def create_app(
         return {
             "allowed": decision.allowed,
             "blocked": decision.blocked,
+            "decision": decision.to_dict(),
+        }
+
+    @app.post("/v1/inspect/output")
+    async def inspect_output_endpoint(
+        payload: InspectOutputPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        """Screen a tool's output before the agent reads it. Pass the returned
+        ``output`` to the agent: secrets in it are already redacted."""
+        _require_auth(authorization, x_api_key)
+        ctx = firewall.session(session_id=payload.session_id)
+        decision, output = firewall.inspect_output(payload.tool, payload.output, ctx=ctx)
+        return {
+            "output": output,
+            "redacted": output != payload.output,
+            "tainted": ctx.tainted,
             "decision": decision.to_dict(),
         }
 

@@ -25,7 +25,8 @@ from .detectors import Detector
 from .escalation import arguments_text, route_inbound, route_outbound, run_detectors
 from .policy import Policy, Rule
 from .rules import default_rules
-from .rules.injection import scan_text
+from .rules.egress import EgressRule, redact_secrets
+from .rules.injection import MAX_SCAN_BYTES, scan_text
 from .types import (
     Action,
     Context,
@@ -326,6 +327,70 @@ class Firewall:
                   {"arguments": redact(call.arguments), "risk_tier": risk_tier})
         return decision
 
+    def inspect_output(self, tool: str, output: Any, ctx: Optional[Context] = None,
+                       session_id: Optional[str] = None) -> "tuple[Decision, Any]":
+        """Screen what a tool returned before the agent reads it.
+
+        The call has already run, so nothing here blocks. Instead:
+
+          * a hidden instruction in *any* tool's output (a CRM note, a web page)
+            taints the session, so tools fenced off from untrusted content lock;
+          * credentials in the output are redacted before the model sees them;
+          * bulk personal data is flagged in the audit log.
+
+        Returns ``(decision, output)``; ``output`` is the redacted text when a
+        secret was found, otherwise the original value unchanged. Only string
+        output is inspected; other types pass through.
+        """
+        started = time.perf_counter()
+        ctx = ctx or self.session(session_id)
+        source = "output:" + tool
+        findings: List[Finding] = []
+        if not isinstance(output, str) or not output:
+            decision = Decision.from_findings([], session_id=ctx.session_id, tool=source,
+                                              latency_ms=(time.perf_counter() - started) * 1000)
+            return decision, output
+
+        # Scan the head of very large outputs rather than refusing them: the call
+        # already ran, and a web page is often bigger than the input scan limit.
+        head = output[:MAX_SCAN_BYTES // 4]
+        tool_policy = self.policy.tool(tool)
+        untrusted = bool(tool_policy and tool_policy.produces_untrusted_output)
+
+        injected = [f for f in scan_text(head, trust=Trust.UNTRUSTED, location=source)
+                    if f.rule_id != "injection.oversize_input"]
+        for f in injected:
+            findings.append(Finding(rule_id=f.rule_id.replace("injection.", "output."),
+                                    action=Action.FLAG, severity=f.severity,
+                                    message="Tool %s returned text with %s" % (tool, f.message),
+                                    evidence=dict(f.evidence, tool=tool)))
+        if untrusted or injected:
+            ctx.taint(tool)
+
+        redacted, secrets = redact_secrets(output)
+        if secrets:
+            findings.append(Finding(
+                rule_id="output.secret_redacted", action=Action.FLAG, severity=Severity.HIGH,
+                message="Tool %s returned %s; redacted before the agent saw it."
+                        % (tool, ", ".join(s.replace("_", " ") for s in secrets)),
+                evidence={"tool": tool, "secret_types": secrets}))
+
+        for f in EgressRule()._check_bulk_pii(source, head):
+            findings.append(Finding(
+                rule_id="output.bulk_pii", action=Action.FLAG, severity=f.severity,
+                message="Tool %s returned bulk personal data: %s" % (tool, f.message),
+                evidence=dict(f.evidence, tool=tool)))
+
+        decision = Decision.from_findings(
+            [self._apply_shadow(f) for f in findings],
+            session_id=ctx.session_id, tool=source,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            route="tool_output",
+        )
+        self._log("tool_output_inspected", decision, ctx, {
+            "output_length": len(output), "tainted": ctx.tainted, "redacted": bool(secrets)})
+        return decision, (redacted if secrets else output)
+
     def commit(self, tool: str, arguments: Dict[str, Any], ctx: Context) -> None:
         """Charge budgets and rate limits for a call that was actually performed."""
         call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
@@ -384,6 +449,8 @@ class Firewall:
             ctx.taint(tool_name)
 
         self._log("tool_call_executed", decision, ctx, dict(extra or {}))
+        if isinstance(result, str):
+            _, result = self.inspect_output(tool, result, ctx=ctx)
         return result
 
     # ------------------------------------------------------------ integration

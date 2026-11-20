@@ -568,6 +568,7 @@ uvicorn fairewall.proxy:app --host 0.0.0.0 --port 8000
 | `POST /v1/inspect/input` | Screen inbound text |
 | `POST /v1/inspect/tool` | Evaluate candidate tool call |
 | `POST /v1/commit/tool` | Advance budgets after execution |
+| `POST /v1/inspect/output` | Screen a tool's output before the agent reads it: hidden instructions taint the session, secrets come back redacted |
 | `GET  /v1/approvals` | List held calls (reviewer key; `?status_filter=pending`) |
 | `GET  /v1/approvals/{id}` | Poll one held call (agent or reviewer key) |
 | `POST /v1/approvals/{id}/approve` | Approve, after a policy re-check (reviewer key) |
