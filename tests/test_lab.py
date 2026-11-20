@@ -1,6 +1,7 @@
 """The Lab, end to end: chapters, All checks, isolation, review races, failures, shared state."""
 import json
 import threading
+from concurrent.futures import Future
 
 import pytest
 from fastapi.testclient import TestClient
@@ -256,6 +257,26 @@ def test_two_lab_processes_share_one_database(tmp_path):
 
 
 # --------------------------------------------------------- HTTP and isolation
+
+def test_http_existing_run_loads_on_a_cold_worker(lab):
+    sandbox = lab.create_workspace()
+    run = lab.start_run(sandbox["workspace"], chapter=1)
+    cold = TestClient(create_lab_app(Lab(lab.data)))
+    result = Future()
+
+    def load_run():
+        try:
+            result.set_result(cold.get("/api/runs/" + run["run_id"],
+                                       headers={"Authorization": "Bearer " + sandbox["propose_token"]}))
+        except Exception as exc:
+            result.set_exception(exc)
+
+    # A deadlock should fail this test rather than hang the test process.
+    threading.Thread(target=load_run, daemon=True).start()
+    response = result.result(timeout=5)
+    assert response.status_code == 200
+    assert response.json()["effects"]["refunds"] == run["effects"]["refunds"]
+
 
 def test_http_isolation_between_sandboxes(lab):
     c = TestClient(create_lab_app(lab))
