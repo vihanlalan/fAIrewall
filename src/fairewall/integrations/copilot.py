@@ -33,7 +33,8 @@ that case and enforce auth at the API gateway layer).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..sdk import GovernanceSDK
 from ..types import Decision, Principal, Trust
@@ -123,15 +124,24 @@ class CopilotAdapter:
         validate_jwt: bool = True,
         tenant_id: Optional[str] = None,
         audience: Optional[str] = None,
+        jwks_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         if not _FASTAPI_AVAILABLE:
             raise ImportError(
                 "CopilotAdapter requires `pip install fairewall[copilot]`"
             )
+        if validate_jwt and not (tenant_id and audience):
+            raise ValueError(
+                "CopilotAdapter(validate_jwt=True) needs both tenant_id and audience; "
+                "pass validate_jwt=False only for local development."
+            )
         self.sdk = sdk
         self.validate_jwt = validate_jwt
         self.tenant_id = tenant_id
         self.audience = audience
+        # Injectable so tests (and air-gapped deployments) can supply keys.
+        self._jwks_provider = jwks_provider or self._fetch_azure_jwks
+        self._jwks_cache: Optional[Tuple[float, Dict[str, Any]]] = None
         self.router = APIRouter(prefix="/v1/copilot", tags=["Copilot Governance"])
         self._register_routes()
 
@@ -154,18 +164,39 @@ class CopilotAdapter:
             )
         token = parts[1]
         try:
-            from jose import jwt, JWTError  # type: ignore
-            issuer = (
-                f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
-                if self.tenant_id else None
+            from jose import jwt  # type: ignore
+            issuer = f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
+            claims = jwt.decode(
+                token,
+                self._jwks(),
+                algorithms=["RS256"],
+                audience=self.audience,
+                issuer=issuer,
             )
-            options: Dict[str, Any] = {"verify_signature": False}  # offline check
-            claims = jwt.decode(token, key=None, options=options,
-                                audience=self.audience, issuer=issuer)
-            return claims.get("oid") or claims.get("sub")
-        except Exception:
-            # jose not installed or decode failed; fall back to presence only
-            return None
+        except Exception as exc:
+            # Fail closed: a token we cannot verify is a token we do not trust.
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid bearer token (%s)." % type(exc).__name__,
+            ) from exc
+        return claims.get("oid") or claims.get("sub")
+
+    def _jwks(self) -> Dict[str, Any]:
+        """Signing keys, cached for an hour."""
+        now = time.time()
+        if self._jwks_cache and now - self._jwks_cache[0] < 3600:
+            return self._jwks_cache[1]
+        keys = self._jwks_provider()
+        self._jwks_cache = (now, keys)
+        return keys
+
+    def _fetch_azure_jwks(self) -> Dict[str, Any]:
+        import json as _json
+        import urllib.request
+
+        url = "https://login.microsoftonline.com/%s/discovery/v2.0/keys" % self.tenant_id
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - fixed https host
+            return _json.loads(resp.read().decode("utf-8"))
 
     # ------------------------------------------------------------------
 

@@ -18,6 +18,8 @@ def create_app(
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
     detectors: Optional[Sequence[Detector]] = None,
+    approvals=None,
+    reviewer_api_key: Optional[str] = None,
 ):
     from .app import create_app as _create_app
     return _create_app(
@@ -28,6 +30,8 @@ def create_app(
         upstream_url=upstream_url,
         api_key=api_key,
         detectors=detectors,
+        approvals=approvals,
+        reviewer_api_key=reviewer_api_key,
     )
 
 
@@ -40,6 +44,7 @@ def run_server(
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
     detectors: Optional[Sequence[Detector]] = None,
+    reviewer_api_key: Optional[str] = None,
 ) -> None:
     """Run the proxy using uvicorn."""
     try:
@@ -50,7 +55,8 @@ def run_server(
     policy = Policy.from_file(policy_path) if policy_path else Policy()
     audit = AuditLog(path=audit_path) if audit_path else None
     fw = Firewall(policy=policy, audit=audit, shadow=shadow, detectors=detectors)
-    app = create_app(firewall=fw, upstream_url=upstream_url, api_key=api_key)
+    app = create_app(firewall=fw, upstream_url=upstream_url, api_key=api_key,
+                     reviewer_api_key=reviewer_api_key)
 
     print(f"[fAIrewall] Starting proxy server on http://{host}:{port}")
     print(f"[fAIrewall] Policy: v{policy.version} [{policy.fingerprint()}] | Shadow: {shadow}")

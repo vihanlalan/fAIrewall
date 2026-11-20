@@ -32,6 +32,7 @@ Platform presets::
     policy = load_preset("COPILOT_ENTERPRISE")
 """
 
+from .approvals import ApprovalError, ApprovalQueue, ApprovalRequest, ApprovalStatus, needs_human
 from .audit import AuditLog, ChainVerification, verify_chain, verify_file
 from .detectors import Detector, DetectorResult, HeuristicDetector, OnnxDetector
 from .firewall import Firewall, redact
@@ -54,6 +55,12 @@ from .types import (
 __version__ = "0.2.0"
 
 __all__ = [
+    # Human approval
+    "ApprovalQueue",
+    "ApprovalRequest",
+    "ApprovalStatus",
+    "ApprovalError",
+    "needs_human",
     # Low-level core
     "Firewall",
     "Policy",

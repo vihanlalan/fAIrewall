@@ -158,6 +158,7 @@ class ZapierWebhookAdapter:
         sdk: GovernanceSDK,
         webhook_secret: Optional[str] = None,
         verify_signature: bool = True,
+        admin_key: Optional[str] = None,
     ) -> None:
         if not _FASTAPI_AVAILABLE:
             raise ImportError(
@@ -166,6 +167,9 @@ class ZapierWebhookAdapter:
         self.sdk = sdk
         self.webhook_secret = webhook_secret
         self.verify_signature = verify_signature
+        # Protects GET /audit, which returns logged tool arguments. With no key
+        # configured the endpoint is disabled rather than left open.
+        self.admin_key = admin_key
         self.router = APIRouter(prefix="/v1/zapier", tags=["Zapier Governance"])
         self._register_routes()
 
@@ -200,6 +204,7 @@ class ZapierWebhookAdapter:
 
         router = self.router
         sdk = self.sdk
+        adapter = self
 
         @router.get("/health")
         async def health() -> Dict[str, Any]:
@@ -298,8 +303,21 @@ class ZapierWebhookAdapter:
             }
 
         @router.get("/audit")
-        async def get_audit(last: int = 50) -> Dict[str, Any]:
+        async def get_audit(
+            last: int = 50,
+            x_api_key: Optional[str] = Header(None),
+        ) -> Dict[str, Any]:
             """Return the last N audit records and chain verification status."""
+            if not adapter.admin_key:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Audit endpoint disabled: configure an admin key.",
+                )
+            if not hmac.compare_digest(str(x_api_key or ""), adapter.admin_key):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or missing X-API-Key.",
+                )
             verification = sdk.verify_audit()
             records = sdk.audit.records()[-last:]
             return {

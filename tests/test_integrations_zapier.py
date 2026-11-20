@@ -177,8 +177,21 @@ class TestZapierWebhookAdapter:
         )
         assert resp.status_code == 401
 
-    def test_audit_endpoint(self):
-        resp = self.client.get("/v1/zapier/audit")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "valid" in data
+    def test_audit_endpoint_is_disabled_without_admin_key(self):
+        assert self.client.get("/v1/zapier/audit").status_code == 403
+
+    def test_audit_endpoint_requires_the_admin_key(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from fairewall.integrations.zapier import ZapierWebhookAdapter
+
+        adapter = ZapierWebhookAdapter(self.adapter.sdk, webhook_secret="s",
+                                       verify_signature=False, admin_key="k-123")
+        app = FastAPI()
+        app.include_router(adapter.router)
+        client = TestClient(app)
+        assert client.get("/v1/zapier/audit").status_code == 401
+        assert client.get("/v1/zapier/audit", headers={"X-API-Key": "wrong"}).status_code == 401
+        ok = client.get("/v1/zapier/audit", headers={"X-API-Key": "k-123"})
+        assert ok.status_code == 200
+        assert "valid" in ok.json()

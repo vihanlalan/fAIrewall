@@ -285,7 +285,7 @@ class Firewall:
         """Adjudicate one tool call. Pure: nothing runs, no state advances."""
         started = time.perf_counter()
         ctx = ctx or self.session(session_id, principal)
-        call = ToolCall(tool=tool, arguments=dict(arguments or {}))
+        call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
 
         findings: List[Finding] = []
         for rule in self.rules:
@@ -328,7 +328,7 @@ class Firewall:
 
     def commit(self, tool: str, arguments: Dict[str, Any], ctx: Context) -> None:
         """Charge budgets and rate limits for a call that was actually performed."""
-        call = ToolCall(tool=tool, arguments=dict(arguments or {}))
+        call = ToolCall(tool=self.policy.canonical_tool(tool), arguments=dict(arguments or {}))
         for rule in self.rules:
             rule.commit(call, ctx, self.policy)
 
@@ -360,22 +360,31 @@ class Firewall:
                     raise FirewallBlock(decision)
                 return "SECURITY BLOCK: " + decision.reason
 
-            try:
-                result = fn(**arguments)
-            except Exception as exc:
-                self._log("tool_call_errored", decision, ctx,
-                          {"error": type(exc).__name__ + ": " + str(exc)[:200]})
-                raise
+            return self._perform(tool, fn, arguments, ctx, decision)
 
-            self.commit(tool, arguments, ctx)
+    def _perform(self, tool: str, fn: Callable[..., Any], arguments: Dict[str, Any],
+                 ctx: Context, decision: Decision, extra: Optional[Dict[str, Any]] = None) -> Any:
+        """Run a call that has already been permitted: execute, charge, taint, log.
 
-            tool_policy = self.policy.tool(tool)
-            if tool_policy and tool_policy.produces_untrusted_output:
-                tool_name = getattr(tool, "name", str(tool))
-                ctx.taint(tool_name)
+        Callers must hold ``session_lock(ctx.session_id)`` and must have
+        inspected the call under that same lock.
+        """
+        try:
+            result = fn(**arguments)
+        except Exception as exc:
+            self._log("tool_call_errored", decision, ctx,
+                      {"error": type(exc).__name__ + ": " + str(exc)[:200], **(extra or {})})
+            raise
 
-            self._log("tool_call_executed", decision, ctx, {})
-            return result
+        self.commit(tool, arguments, ctx)
+
+        tool_policy = self.policy.tool(tool)
+        if tool_policy and tool_policy.produces_untrusted_output:
+            tool_name = getattr(tool, "name", str(tool))
+            ctx.taint(tool_name)
+
+        self._log("tool_call_executed", decision, ctx, dict(extra or {}))
+        return result
 
     # ------------------------------------------------------------ integration
 

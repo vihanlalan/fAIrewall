@@ -20,7 +20,7 @@ def _detectors(args: argparse.Namespace) -> List[Detector]:
 
 
 def _add_detector_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--detector", action="append", choices=["heuristic", "onnx"],
+    p.add_argument("--detector", action="append", choices=["heuristic", "learned", "onnx"],
                    help="Enable a tier-1 detector (repeatable). Runs only on escalated calls.")
     p.add_argument("--onnx-model", help="Path to ONNX classifier (with --detector onnx)")
     p.add_argument("--onnx-tokenizer", help="Path to tokenizer.json (with --detector onnx)")
@@ -260,7 +260,113 @@ def cmd_serve(args: argparse.Namespace) -> int:
         upstream_url=args.upstream_url,
         api_key=args.api_key,
         detectors=_detectors(args),
+        reviewer_api_key=args.reviewer_key,
     )
+    return 0
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    """Write a SYNTHETIC agent tool-call log for trying out the report."""
+    from .harness import generate_log, write_log
+
+    records = generate_log(count=args.count, seed=args.seed)
+    write_log(records, args.output)
+    print(f"Wrote {args.count} SYNTHETIC tool calls to {args.output}")
+    print("This is invented demo data, not customer traffic.")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Replay a tool-call log and print what would be approved, reviewed, blocked."""
+    from .presets import load_preset
+    from .report import build_report, default_policy_for, load_log, render_text
+
+    try:
+        meta, records = load_log(args.log)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if not records:
+        print("Error: the log has no tool-call records.", file=sys.stderr)
+        return 2
+
+    if args.policy:
+        policy = Policy.from_file(args.policy)
+    elif args.preset:
+        policy = load_preset(args.preset)
+    else:
+        policy = default_policy_for(meta) or Policy()
+
+    synthetic = bool(meta.get("synthetic")) or args.synthetic
+    try:
+        report = build_report(records, policy, args.minutes_per_review, synthetic=synthetic,
+                              detectors=_detectors(args))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    out = json.dumps(report, indent=2) if args.json else render_text(report)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(out + "\n")
+        print(f"Wrote report to {args.output}")
+    else:
+        print(out)
+    return 0
+
+
+def _load_policy_arg(value: str) -> Policy:
+    """A policy argument is a file path if one exists, otherwise a preset name."""
+    if os.path.exists(value):
+        return Policy.from_file(value)
+    from .presets import load_preset
+    try:
+        return load_preset(value)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"'{value}' is neither a policy file nor a known preset") from exc
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    """Replay a log under two policies and show every call whose verdict changes."""
+    from .report import build_diff, load_log, render_diff_text
+
+    try:
+        old_policy = _load_policy_arg(args.old)
+        new_policy = _load_policy_arg(args.new)
+        _, records = load_log(args.log)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if not records:
+        print("Error: the log has no tool-call records.", file=sys.stderr)
+        return 2
+
+    diff = build_diff(records, old_policy, new_policy, detectors=_detectors(args),
+                      max_examples=args.examples)
+    out = json.dumps(diff, indent=2) if args.json else render_diff_text(diff)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(out + "\n")
+        print(f"Wrote diff to {args.output}")
+    else:
+        print(out)
+    # Non-zero only when asked, so the command can gate a CI pipeline.
+    return 1 if (args.fail_on_looser and diff["looser"]) else 0
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    """Serve the judge-facing demo page backed by the real engine."""
+    try:
+        import uvicorn  # type: ignore
+        from .demo import create_demo_app
+    except ImportError as exc:
+        print(f"Failed to load the demo: {exc}. Install with: pip install -e \".[proxy]\"", file=sys.stderr)
+        return 2
+    print(f"[fAIrewall] Demo running at http://{args.host}:{args.port}/demo")
+    print("[fAIrewall] Real engine, simulated tools. Press Ctrl+C to stop.")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print("[fAIrewall] WARNING: the demo endpoints have no authentication.", file=sys.stderr)
+    uvicorn.run(create_demo_app(), host=args.host, port=args.port, log_level="warning")
     return 0
 
 
@@ -328,6 +434,14 @@ def main(argv: Optional[List[str]] = None) -> int:
              "/v1/commit/tool, /v1/audit/verify). Can also be set via FAIREWALL_API_KEY "
              "environment variable. When unset, endpoints are unauthenticated (local dev only).",
     )
+    p_serve.add_argument(
+        "--reviewer-key",
+        dest="reviewer_key",
+        default=None,
+        help="Key required to list, approve or reject held calls (/v1/approvals). "
+             "Can also be set via FAIREWALL_REVIEWER_KEY. Defaults to --api-key; use a "
+             "different key so an agent cannot approve its own calls.",
+    )
     _add_detector_args(p_serve)
     p_serve.set_defaults(func=cmd_serve)
 
@@ -358,6 +472,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Enable uvicorn auto-reload (development only).",
     )
     p_serve_sdk.set_defaults(func=cmd_serve_sdk)
+
+    # simulate
+    p_sim = subparsers.add_parser("simulate", help="Generate a SYNTHETIC tool-call log for demos")
+    p_sim.add_argument("--count", type=int, default=1000, help="Number of tool calls (default: 1000)")
+    p_sim.add_argument("--seed", type=int, default=None,
+                       help="Random seed (default: a fresh random one, recorded in the log header)")
+    p_sim.add_argument("--output", "-o", default="synthetic_log.jsonl", help="Output JSONL path")
+    p_sim.set_defaults(func=cmd_simulate)
+
+    # report
+    p_rep = subparsers.add_parser(
+        "report", help="Replay a tool-call log: what would be auto-approved, reviewed, or blocked")
+    p_rep.add_argument("log", help="Path to a JSONL tool-call log")
+    p_rep.add_argument("--minutes-per-review", type=float, required=True,
+                       help="Minutes one manual review takes (your estimate; no default)")
+    p_rep.add_argument("--policy", help="Path to policy JSON/YAML file")
+    p_rep.add_argument("--preset", help="Policy preset name (e.g. ZAPIER_SME)")
+    p_rep.add_argument("--synthetic", action="store_true", help="Stamp the report as synthetic")
+    _add_detector_args(p_rep)
+    p_rep.add_argument("--json", action="store_true", help="Output raw JSON")
+    p_rep.add_argument("--output", "-o", help="Write the report to a file")
+    p_rep.set_defaults(func=cmd_report)
+
+    # diff
+    p_diff = subparsers.add_parser(
+        "diff", help="Preview a policy change: replay a log under OLD and NEW, list changed verdicts")
+    p_diff.add_argument("old", help="Current policy: a JSON/YAML file or a preset name")
+    p_diff.add_argument("new", help="Proposed policy: a JSON/YAML file or a preset name")
+    p_diff.add_argument("log", help="Path to a JSONL tool-call log")
+    p_diff.add_argument("--examples", type=int, default=20,
+                        help="How many changed calls to list (default: 20)")
+    p_diff.add_argument("--fail-on-looser", action="store_true",
+                        help="Exit 1 if the new policy lets through anything the old one stopped")
+    _add_detector_args(p_diff)
+    p_diff.add_argument("--json", action="store_true", help="Output raw JSON")
+    p_diff.add_argument("--output", "-o", help="Write the diff to a file")
+    p_diff.set_defaults(func=cmd_diff)
+
+    # demo
+    p_demo = subparsers.add_parser("demo", help="Serve the browser demo for judges (real engine, simulated tools)")
+    p_demo.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
+    p_demo.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
+    p_demo.set_defaults(func=cmd_demo)
 
     parsed = parser.parse_args(argv)
     if not hasattr(parsed, "func"):

@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fAIrewall Live Demo</title>
+<style>
+  :root {
+    --bg: #0a0e16;
+    --panel: #111827;
+    --panel-2: #172033;
+    --line: #243049;
+    --text: #e8edf5;
+    --muted: #94a3b8;
+    --blue: #5b9bff;
+    --blue-soft: rgba(91, 155, 255, 0.14);
+    --allow: #34d399;
+    --allow-soft: rgba(52, 211, 153, 0.14);
+    --escalate: #fbbf24;
+    --escalate-soft: rgba(251, 191, 36, 0.14);
+    --block: #f87171;
+    --block-soft: rgba(248, 113, 113, 0.14);
+    --mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+    --serif: Cambria, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); }
+  button { font: inherit; }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    padding: 18px 32px; border-bottom: 1px solid var(--line);
+    background: radial-gradient(1200px 200px at 80% -60px, rgba(91,155,255,.18), transparent);
+  }
+  .brand { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .logo { font: 700 30px/1 var(--serif); letter-spacing: -0.5px; }
+  .logo span { color: var(--blue); }
+  .tagline { color: var(--muted); font-size: 14px; }
+  .head-right { display: flex; align-items: center; gap: 10px; }
+  .chip { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
+  .btn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--blue); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #08111f; font-weight: 600; }
+  .btn.ok { border-color: var(--allow); color: var(--allow); }
+  .btn.no { border-color: var(--block); color: var(--block); }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  nav { display: flex; gap: 4px; padding: 0 32px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab {
+    background: none; border: 0; color: var(--muted); padding: 14px 14px 12px; cursor: pointer;
+    border-bottom: 2px solid transparent; white-space: nowrap;
+  }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--blue); }
+  .tab .num { color: var(--blue); font-weight: 700; margin-right: 6px; }
+  .badge { background: var(--escalate); color: #1a1300; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 7px; margin-left: 6px; }
+
+  main { padding: 28px 32px 48px; max-width: 1280px; margin: 0 auto; }
+  section[hidden] { display: none; }
+  h2 { font: 700 26px/1.2 var(--serif); margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 22px; max-width: 760px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .mono { font-family: var(--mono); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+
+  .pill { display: inline-block; font-weight: 700; font-size: 12px; letter-spacing: .1em; border-radius: 999px; padding: 4px 12px; }
+  .pill.allow { background: var(--allow); color: #04140d; }
+  .pill.escalate { background: var(--escalate); color: #1a1300; }
+  .pill.block { background: var(--block); color: #1f0505; }
+  .pill.big { font-size: 15px; padding: 7px 18px; }
+  .status { font-size: 12px; font-weight: 600; border-radius: 6px; padding: 2px 8px; }
+  .status.pending { background: var(--escalate-soft); color: var(--escalate); }
+  .status.approved { background: var(--allow-soft); color: var(--allow); }
+  .status.rejected, .status.expired { background: var(--block-soft); color: var(--block); }
+
+  /* Live attacks */
+  .attack-grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; align-items: start; }
+  .scenarios { display: flex; flex-direction: column; gap: 10px; }
+  .scenario { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; color: var(--text); }
+  .scenario:hover { border-color: var(--blue); }
+  .scenario.active { border-color: var(--blue); background: var(--blue-soft); }
+  .scenario b { display: block; margin-bottom: 2px; }
+  .scenario span { color: var(--muted); font-size: 13px; }
+  .stage { display: flex; flex-direction: column; gap: 0; }
+  .step { position: relative; }
+  .step + .step { margin-top: 26px; }
+  .step + .step::before { content: ""; position: absolute; left: 24px; top: -22px; height: 18px; border-left: 2px solid var(--line); }
+  .email { font-family: var(--mono); font-size: 14px; background: var(--panel-2); border-radius: 8px; padding: 12px 14px; margin: 10px 0; white-space: pre-wrap; }
+  .call { font-family: var(--mono); font-size: 14.5px; margin-top: 8px; word-break: break-word; }
+  .verdict-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 8px 0 10px; }
+  .findings { margin: 0; padding: 0; list-style: none; }
+  .findings li { padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .findings code { color: var(--blue); font-family: var(--mono); font-size: 13px; }
+  .outcome { font-size: 14px; }
+  .outcome.block { color: var(--block); } .outcome.allow { color: var(--allow); } .outcome.escalate { color: var(--escalate); }
+  .squares { display: grid; grid-template-columns: repeat(15, 1fr); gap: 6px; margin: 12px 0; max-width: 520px; }
+  .sq { aspect-ratio: 1; border-radius: 4px; }
+  .sq.allow { background: var(--allow); } .sq.block { background: var(--block); } .sq.escalate { background: var(--escalate); }
+  .empty { color: var(--muted); padding: 40px 18px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; }
+  .link { color: var(--blue); cursor: pointer; text-decoration: underline; background: none; border: 0; padding: 0; }
+
+  /* Approvals */
+  .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  input[type="text"], input[type="number"], select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit;
+  }
+  .approvals { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .appr-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .appr-args { font-family: var(--mono); font-size: 13px; background: var(--panel-2); border-radius: 8px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+  .appr-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .note { font-size: 13px; margin-top: 8px; }
+
+  /* Report */
+  .report-grid { display: grid; grid-template-columns: 430px 1fr; gap: 20px; align-items: start; }
+  .donut-wrap { display: flex; align-items: center; gap: 22px; }
+  .legend div { margin: 6px 0; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
+  .stat .big { font: 700 34px/1.1 var(--serif); margin-top: 6px; }
+  .synthetic { display: inline-block; background: #334155; color: #e2e8f0; font-size: 11px; font-weight: 700; letter-spacing: .12em; border-radius: 6px; padding: 3px 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .up { color: var(--block); } .down { color: var(--allow); }
+
+  /* Diff */
+  .controls { display: flex; gap: 28px; flex-wrap: wrap; align-items: center; }
+  .slider-box { min-width: 280px; }
+  .slider-box input { width: 100%; accent-color: var(--blue); }
+  .slider-val { font: 700 22px var(--serif); }
+  .ex { border-top: 1px solid var(--line); padding: 10px 0; font-size: 14px; }
+  .ex .dir { font-weight: 700; font-size: 12px; letter-spacing: .08em; }
+  .ex .dir.looser { color: var(--block); } .ex .dir.stricter { color: var(--allow); }
+
+  /* Audit */
+  .chain-ok { color: var(--allow); font-weight: 600; } .chain-bad { color: var(--block); font-weight: 600; }
+  .alert { border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+  .alert.bad { background: var(--block-soft); border: 1px solid var(--block); }
+  tr.broken td { background: var(--block-soft); }
+  .hash { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; padding: 0 32px 28px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+  @media (max-width: 900px) {
+    header, nav, main { padding-left: 16px; padding-right: 16px; }
+    .attack-grid, .report-grid, .two { grid-template-columns: 1fr; }
+    .squares { grid-template-columns: repeat(10, 1fr); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">f<span>AI</span>rewall</div>
+    <div class="tagline">Let agents act. Cap the worst case.</div>
+  </div>
+  <div class="head-right">
+    <span class="chip">Real engine &middot; simulated tools</span>
+    <button class="btn" id="reset">Reset demo</button>
+  </div>
+</header>
+
+<nav role="tablist">
+  <button class="tab" role="tab" data-tab="attacks" aria-selected="true"><span class="num">1</span>Live attacks</button>
+  <button class="tab" role="tab" data-tab="approvals" aria-selected="false"><span class="num">2</span>Approval queue<span class="badge" id="pending-badge" hidden>0</span></button>
+  <button class="tab" role="tab" data-tab="report" aria-selected="false"><span class="num">3</span>Shadow-mode report</button>
+  <button class="tab" role="tab" data-tab="diff" aria-selected="false"><span class="num">4</span>Policy diff</button>
+  <button class="tab" role="tab" data-tab="audit" aria-selected="false"><span class="num">5</span>Audit log</button>
+</nav>
+
+<main>
+  <!-- 1 Live attacks -->
+  <section id="tab-attacks">
+    <h2>Every action gets a verdict before it runs</h2>
+    <p class="lead">Pick a situation. The agent's tool call goes through the real fAIrewall engine and comes back as allow, escalate or block, with the rule that decided it.</p>
+    <div class="attack-grid">
+      <div class="scenarios" id="scenario-list"></div>
+      <div id="stage"><div class="empty">Choose a scenario on the left to run it.</div></div>
+    </div>
+  </section>
+
+  <!-- 2 Approvals -->
+  <section id="tab-approvals" hidden>
+    <h2>Escalated calls wait for a person</h2>
+    <p class="lead">An escalated call does not run until someone approves it. On approval fAIrewall checks the call again, so a budget used up while it waited still holds. Hard blocks never reach this queue.</p>
+    <div class="toolbar">
+      <label class="small muted" for="reviewer">Reviewer</label>
+      <input type="text" id="reviewer" value="finance-lead" aria-label="Reviewer name">
+      <button class="btn" id="refresh-approvals">Refresh</button>
+    </div>
+    <div id="approval-list"></div>
+  </section>
+
+  <!-- 3 Report -->
+  <section id="tab-report" hidden>
+    <h2>See the saving before you enforce anything</h2>
+    <p class="lead">Replay a past agent log through the engine. Nothing executes. The report shows what could have run unattended, what needed a person, and what should never have run.</p>
+    <div class="toolbar">
+      <label class="small muted" for="rep-count">Calls</label>
+      <select id="rep-count"><option>500</option><option selected>2000</option><option>5000</option></select>
+      <label class="small muted" for="rep-min">Minutes per manual review</label>
+      <input type="number" id="rep-min" value="3" min="0.5" max="60" step="0.5" style="width:80px">
+      <button class="btn primary" id="run-report">Replay log</button>
+      <span class="synthetic">SYNTHETIC DATA</span>
+    </div>
+    <div id="report-out"><div class="empty">Press "Replay log" to run the report.</div></div>
+  </section>
+
+  <!-- 4 Diff -->
+  <section id="tab-diff" hidden>
+    <h2>Preview a policy change on real traffic</h2>
+    <p class="lead">Change a rule and replay the same log under the old and new policy. Every call whose verdict changes is listed. "Looser" means the new rule lets through something the old one stopped.</p>
+    <div class="card controls" style="margin-bottom:18px">
+      <div class="slider-box">
+        <div class="label">Refund cap per call</div>
+        <div class="slider-val" id="cap-val">$200</div>
+        <input type="range" id="cap" min="50" max="500" step="10" value="200" aria-label="Refund cap">
+        <div class="small muted" id="cap-current">Current policy: $200</div>
+      </div>
+      <label class="small"><input type="checkbox" id="contract-approval" checked> Contracts need human approval</label>
+      <span class="synthetic">SYNTHETIC DATA</span>
+    </div>
+    <div id="diff-out"><div class="empty">Move the slider to compare policies.</div></div>
+  </section>
+
+  <!-- 5 Audit -->
+  <section id="tab-audit" hidden>
+    <h2>Every decision, in a tamper-evident log</h2>
+    <p class="lead">Each record stores the hash of the one before it. Change any past record and verification fails at that exact record.</p>
+    <div class="toolbar">
+      <button class="btn" id="refresh-audit">Refresh</button>
+      <button class="btn no" id="tamper">Simulate tampering with a record</button>
+      <span id="chain-status" class="small"></span>
+    </div>
+    <div id="tamper-out"></div>
+    <div id="audit-out"></div>
+  </section>
+</main>
+
+<footer>fAIrewall MVP demo. Decisions come from the real engine; tools are stubs, so nothing is sent, paid or stored outside this demo.</footer>
+
+<script>
+(function () {
+  "use strict";
+  var LABEL = { allow: "ALLOW", escalate: "ESCALATE", block: "BLOCK" };
+  var BUCKET = { auto_approved: "Auto-approved", human_review: "Human review", blocked: "Blocked" };
+  var BUCKET_COLOR = { auto_approved: "var(--allow)", human_review: "var(--escalate)", blocked: "var(--block)" };
+  var $ = function (id) { return document.getElementById(id); };
+
+  function esc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function pill(v, big) { return '<span class="pill ' + v + (big ? " big" : "") + '">' + LABEL[v] + "</span>"; }
+  function fmt(n) { return Number(n).toLocaleString("en-IN"); }
+  function callText(tool, args) {
+    var parts = Object.keys(args || {}).map(function (k) { return k + "=" + JSON.stringify(args[k]); });
+    return tool + "(" + parts.join(", ") + ")";
+  }
+  function api(path, body) {
+    var opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    return fetch(path, opts).then(function (r) {
+      return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || r.statusText); return j; });
+    });
+  }
+  function fail(el, err) { el.innerHTML = '<div class="empty">Something went wrong: ' + esc(err.message) + "</div>"; }
+
+  // ---------------------------------------------------------------- tabs
+  var loaders = {};
+  function show(name) {
+    document.querySelectorAll(".tab").forEach(function (t) { t.setAttribute("aria-selected", t.dataset.tab === name ? "true" : "false"); });
+    document.querySelectorAll("main section").forEach(function (s) { s.hidden = s.id !== "tab-" + name; });
+    if (loaders[name]) loaders[name]();
+  }
+  document.querySelectorAll(".tab").forEach(function (t) { t.addEventListener("click", function () { show(t.dataset.tab); }); });
+
+  // ------------------------------------------------------- 1 live attacks
+  api("/demo/api/scenarios").then(function (d) {
+    $("scenario-list").innerHTML = d.scenarios.map(function (s) {
+      return '<button class="scenario" data-id="' + esc(s.id) + '"><b>' + esc(s.title) + "</b><span>" + esc(s.blurb) + "</span></button>";
+    }).join("");
+    document.querySelectorAll(".scenario").forEach(function (b) {
+      b.addEventListener("click", function () {
+        document.querySelectorAll(".scenario").forEach(function (x) { x.classList.toggle("active", x === b); });
+        runScenario(b.dataset.id);
+      });
+    });
+  });
+
+  function findingsList(fs) {
+    if (!fs.length) return '<p class="small muted">No rule fired.</p>';
+    return '<ul class="findings">' + fs.map(function (f) {
+      return "<li><code>" + esc(f.rule_id) + "</code> &nbsp;" + esc(f.message) + "</li>";
+    }).join("") + "</ul>";
+  }
+  function outcomeLine(c) {
+    var extra = c.approval_id ? ' &middot; <button class="link" data-goto="approvals">Open the approval queue</button>' : "";
+    return '<div class="outcome ' + c.verdict + '">' + esc(c.outcome) + extra + '</div>';
+  }
+
+  function runScenario(id) {
+    var stage = $("stage");
+    stage.innerHTML = '<div class="empty">Running&hellip;</div>';
+    api("/demo/api/run/" + encodeURIComponent(id), {}).then(function (r) {
+      var html = '<div class="stage">';
+      var n = 1;
+      if (r.inbound) {
+        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Inbound email &middot; untrusted</div>" +
+          '<div class="email">' + esc(r.inbound.text) + "</div>" +
+          '<div class="verdict-row"><span class="small muted">Screening:</span>' + pill(r.inbound.verdict) +
+          (r.inbound.tainted ? '<span class="status pending">Session tainted</span>' : "") + "</div>" +
+          findingsList(r.inbound.findings) + "</div>";
+      }
+      if (r.calls.length > 3) {
+        var c0 = r.calls[0], firstBlock = r.calls.filter(function (c) { return c.verdict === "block"; })[0];
+        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Agent tool calls</div>" +
+          '<div class="call">' + esc(callText(c0.tool, c0.arguments)) + '  <span class="muted">&times; ' + r.calls.length + " in a few milliseconds</span></div></div>";
+        html += '<div class="step card"><div class="label">' + (n++) + " &middot; Verdicts</div>" +
+          '<div class="squares">' + r.calls.map(function (c) { return '<div class="sq ' + c.verdict + '" title="' + LABEL[c.verdict] + '"></div>'; }).join("") + "</div>" +
+          '<div class="verdict-row">' + pill("allow") + " " + r.counts.allow + " ran &nbsp; " + pill("block") + " " + r.counts.block + " refused</div>" +
+          (firstBlock ? findingsList(firstBlock.findings) : "") + "</div>";
+      } else {
+        r.calls.forEach(function (c, i) {
+          html += '<div class="step card"><div class="label">' + (n++) + " &middot; Agent tool call" + (r.calls.length > 1 ? " " + (i + 1) : "") + "</div>" +
+            '<div class="call">' + esc(callText(c.tool, c.arguments)) + "</div>" +
+            '<div class="verdict-row" style="margin-top:14px">' + pill(c.verdict, true) +
+            '<span class="small muted">decided in ' + c.latency_ms + " ms</span></div>" +
+            findingsList(c.findings) + outcomeLine(c) + "</div>";
+        });
+      }
+      stage.innerHTML = html + "</div>";
+      stage.querySelectorAll("[data-goto]").forEach(function (b) { b.addEventListener("click", function () { show(b.dataset.goto); }); });
+      refreshBadge();
+    }).catch(function (e) { fail(stage, e); });
+  }
+
+  // ------------------------------------------------------------ 2 approvals
+  function refreshBadge() {
+    api("/demo/api/approvals").then(function (d) {
+      var b = $("pending-badge");
+      b.textContent = d.pending; b.hidden = d.pending === 0;
+    });
+  }
+  loaders.approvals = function () {
+    var out = $("approval-list");
+    api("/demo/api/approvals").then(function (d) {
+      $("pending-badge").textContent = d.pending; $("pending-badge").hidden = d.pending === 0;
+      if (!d.approvals.length) {
+        out.innerHTML = '<div class="empty">Nothing is waiting. Run "New vendor contract" or "Two refunds, one budget" in tab 1.</div>';
+        return;
+      }
+      out.innerHTML = '<div class="approvals">' + d.approvals.map(function (a) {
+        var who = a.decided_by ? '<div class="note muted">Decided by <b>' + esc(a.decided_by) + "</b>" + (a.executed ? " &middot; ran (simulated)" : "") + "</div>" : "";
+        var note = a.note ? '<div class="note' + (a.decided_by === "fairewall" ? " up" : "") + '">' + esc(a.note) + "</div>" : "";
+        var actions = a.status === "pending" ?
+          '<div class="appr-actions"><button class="btn ok" data-act="approve" data-id="' + esc(a.id) + '">Approve</button>' +
+          '<button class="btn no" data-act="reject" data-id="' + esc(a.id) + '">Reject</button></div>' : "";
+        return '<div class="card"><div class="appr-head"><span class="mono"><b>' + esc(a.tool) + "</b></span>" +
+          '<span class="status ' + esc(a.status) + '">' + esc(a.status) + "</span></div>" +
+          '<div class="appr-args">' + esc(JSON.stringify(a.arguments, null, 1)) + "</div>" +
+          '<div class="small muted">' + esc(a.reason) + "</div>" + who + note + actions + "</div>";
+      }).join("") + "</div>";
+      out.querySelectorAll("[data-act]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          b.disabled = true;
+          api("/demo/api/approvals/" + b.dataset.id + "/" + b.dataset.act, { reviewer: $("reviewer").value || "reviewer" })
+            .then(loaders.approvals).catch(function (e) { alert(e.message); loaders.approvals(); });
+        });
+      });
+    }).catch(function (e) { fail(out, e); });
+  };
+  $("refresh-approvals").addEventListener("click", loaders.approvals);
+
+  // --------------------------------------------------------------- 3 report
+  function donut(b, total) {
+    var r = 58, c = 2 * Math.PI * r, off = 0, segs = "";
+    ["auto_approved", "human_review", "blocked"].forEach(function (k) {
+      var len = total ? c * b[k] / total : 0;
+      segs += '<circle cx="80" cy="80" r="' + r + '" fill="none" stroke="' + BUCKET_COLOR[k] + '" stroke-width="22" stroke-dasharray="' +
+        len + " " + (c - len) + '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 80 80)"/>';
+      off += len;
+    });
+    return '<svg width="160" height="160" viewBox="0 0 160 160" role="img" aria-label="Verdict split">' + segs +
+      '<text x="80" y="78" text-anchor="middle" fill="var(--text)" font-size="22" font-weight="700">' + fmt(total) + "</text>" +
+      '<text x="80" y="98" text-anchor="middle" fill="var(--muted)" font-size="12">calls</text></svg>';
+  }
+  function runReport() {
+    var out = $("report-out");
+    out.innerHTML = '<div class="empty">Replaying&hellip;</div>';
+    api("/demo/api/report", { count: +$("rep-count").value, minutes_per_review: +$("rep-min").value }).then(function (r) {
+      var b = r.buckets, p = r.percent, adv = r.adversary;
+      var legend = ["auto_approved", "human_review", "blocked"].map(function (k) {
+        return '<div><span class="dot" style="background:' + BUCKET_COLOR[k] + '"></span><b>' + p[k] + "%</b>&nbsp;" + BUCKET[k] + ' <span class="muted">(' + fmt(b[k]) + ")</span></div>";
+      }).join("");
+      var reasons = (r.top_reasons.blocked || []).map(function (x) {
+        return "<tr><td><code class=\"mono\">" + esc(x[0]) + '</code></td><td class="num">' + fmt(x[1]) + "</td></tr>";
+      }).join("");
+      out.innerHTML =
+        '<div class="report-grid"><div class="card"><div class="donut-wrap">' + donut(b, r.total_calls) + '<div class="legend">' + legend + "</div></div></div>" +
+        '<div class="stats">' +
+          '<div class="card stat"><div class="label">Review time saved</div><div class="big">~' + r.hours_saved_estimate + ' h</div><div class="small muted">Estimate: auto-approved calls &times; ' + r.minutes_per_review + " min</div></div>" +
+          (adv ? '<div class="card stat"><div class="label">Random attacks stopped</div><div class="big">' + fmt(adv.attacks - adv.got_through) + " / " + fmt(adv.attacks) + '</div><div class="small muted">' + adv.got_through + " got through (" + adv.got_through_pct + "%)</div></div>" : "") +
+          '<div class="card stat"><div class="label">Typical decision time</div><div class="big">' + r.latency_ms.p50 + ' ms</div><div class="small muted">median (p50) &middot; p99 ' + r.latency_ms.p99 + " ms on this machine</div></div>" +
+        "</div></div>" +
+        '<div class="card" style="margin-top:20px"><div class="label" style="margin-bottom:8px">Top reasons for blocking</div><table><tr><th>Rule</th><th class="num">Calls</th></tr>' + reasons + "</table>" +
+        '<p class="small muted" style="margin:12px 0 0">' + esc(r.notice) + " Seed " + esc(r.seed) + ".</p></div>";
+    }).catch(function (e) { fail(out, e); });
+  }
+  $("run-report").addEventListener("click", runReport);
+
+  // ----------------------------------------------------------------- 4 diff
+  var diffTimer = null;
+  function scheduleDiff() { $("cap-val").textContent = "$" + $("cap").value; clearTimeout(diffTimer); diffTimer = setTimeout(runDiff, 250); }
+  function runDiff() {
+    var out = $("diff-out");
+    api("/demo/api/diff", { refund_cap: +$("cap").value, contract_needs_approval: $("contract-approval").checked }).then(function (d) {
+      $("cap-current").textContent = "Current policy: $" + d.current.refund_cap;
+      var rows = ["auto_approved", "human_review", "blocked"].map(function (k) {
+        var o = d.old.buckets[k], n = d.new.buckets[k], ch = n - o;
+        var cls = ch === 0 ? "" : ((k === "auto_approved") === (ch > 0) ? "down" : "up");
+        return "<tr><td>" + BUCKET[k] + '</td><td class="num">' + fmt(o) + '</td><td class="num">' + fmt(n) + '</td><td class="num ' + cls + '">' + (ch > 0 ? "+" : "") + ch + "</td></tr>";
+      }).join("");
+      var summary = d.changed ?
+        "<p>Verdict changed on <b>" + d.changed + "</b> of " + fmt(d.total_calls) + ' calls: <b class="down">' + d.stricter + ' stricter</b>, <b class="up">' + d.looser + " looser</b>.</p>" :
+        '<p class="muted">No call changes verdict: this is the current policy. Try a $100 cap, or untick "Contracts need human approval".</p>';
+      var ex = d.examples.map(function (e) {
+        return '<div class="ex"><span class="dir ' + e.direction + '">' + e.direction.toUpperCase() + '</span> &nbsp;<span class="mono">' + esc(callText(e.tool, e.arguments)) + "</span>" +
+          '<div class="small muted">' + BUCKET[e.old] + " &rarr; " + BUCKET[e.new] +
+          (e.rules_added.length ? " &middot; now fires: " + esc(e.rules_added.join(", ")) : "") +
+          (e.rules_removed.length ? " &middot; stopped firing: " + esc(e.rules_removed.join(", ")) : "") + "</div></div>";
+      }).join("");
+      out.innerHTML = '<div class="two"><div class="card"><table><tr><th></th><th class="num">Old</th><th class="num">New</th><th class="num">Change</th></tr>' + rows + "</table>" + summary + "</div>" +
+        '<div class="card"><div class="label">Changed calls, looser first</div>' + (ex || '<p class="muted small">None.</p>') + "</div></div>";
+    }).catch(function (e) { fail(out, e); });
+  }
+  $("cap").addEventListener("input", scheduleDiff);
+  $("contract-approval").addEventListener("change", scheduleDiff);
+  loaders.diff = function () { if ($("diff-out").querySelector(".empty")) runDiff(); };
+
+  // ---------------------------------------------------------------- 5 audit
+  var brokenSeq = null;
+  loaders.audit = function () {
+    var out = $("audit-out");
+    api("/demo/api/audit?limit=40").then(function (d) {
+      $("chain-status").innerHTML = d.total ? (d.valid ? '<span class="chain-ok">&#10003; Chain valid</span> &middot; ' + d.checked + " records" : '<span class="chain-bad">Chain broken</span>') : "";
+      if (!d.total) { out.innerHTML = '<div class="empty">No decisions yet. Run a scenario in tab 1.</div>'; return; }
+      out.innerHTML = '<div class="card"><p class="small muted" style="margin-top:0">Chain head <span class="hash">' + esc(d.head) + "</span></p><table>" +
+        '<tr><th class="num">#</th><th>Event</th><th>Tool</th><th>Verdict</th><th>Hash</th><th>Previous hash</th></tr>' +
+        d.records.map(function (r) {
+          return '<tr class="' + (r.seq === brokenSeq ? "broken" : "") + '"><td class="num">' + esc(r.seq) + "</td><td>" + esc(r.event) + '</td><td class="mono">' + esc(r.tool || "") +
+            "</td><td>" + esc(r.verdict || "") + '</td><td class="hash">' + esc((r.hash || "").slice(0, 12)) + '</td><td class="hash">' + esc((r.prev_hash || "").slice(0, 12)) + "</td></tr>";
+        }).join("") + "</table></div>";
+    }).catch(function (e) { fail(out, e); });
+  };
+  $("refresh-audit").addEventListener("click", function () { brokenSeq = null; $("tamper-out").innerHTML = ""; loaders.audit(); });
+  $("tamper").addEventListener("click", function () {
+    api("/demo/api/audit/tamper", {}).then(function (t) {
+      brokenSeq = t.broken_at;
+      $("tamper-out").innerHTML = '<div class="alert bad"><b>Record #' + esc(t.tampered_seq) + " edited:</b> " + esc(t.field) + " changed from <b>" + esc(t.before) + "</b> to <b>" + esc(t.after) +
+        "</b>. Verification " + (t.valid ? "still passes" : "fails at record #" + esc(t.broken_at)) + ' <span class="muted">(' + esc(t.reason || "") + ")</span><div class=\"small muted\" style=\"margin-top:6px\">" + esc(t.note) + "</div></div>";
+      loaders.audit();
+    }).catch(function (e) { $("tamper-out").innerHTML = '<div class="alert bad">' + esc(e.message) + "</div>"; });
+  });
+
+  // ---------------------------------------------------------------- reset
+  $("reset").addEventListener("click", function () {
+    api("/demo/api/reset", {}).then(function () {
+      brokenSeq = null;
+      $("stage").innerHTML = '<div class="empty">Choose a scenario on the left to run it.</div>';
+      document.querySelectorAll(".scenario").forEach(function (x) { x.classList.remove("active"); });
+      $("tamper-out").innerHTML = ""; $("audit-out").innerHTML = ""; $("chain-status").innerHTML = "";
+      $("approval-list").innerHTML = "";
+      refreshBadge();
+      var cur = document.querySelector('.tab[aria-selected="true"]').dataset.tab;
+      if (loaders[cur]) loaders[cur]();
+    });
+  });
+  refreshBadge();
+
+  // Deep links for presenters: #attacks/hijack, #approvals, #report, #diff, #audit
+  function fromHash() {
+    var parts = location.hash.replace(/^#/, "").split("/");
+    var tab = parts[0];
+    if (!tab || !document.querySelector('.tab[data-tab="' + tab + '"]')) return;
+    show(tab);
+    if (tab === "attacks" && parts[1]) {
+      var tryRun = function () {
+        var b = document.querySelector('.scenario[data-id="' + parts[1] + '"]');
+        if (b) b.click(); else setTimeout(tryRun, 100);
+      };
+      tryRun();
+    }
+    if (tab === "report") runReport();
+  }
+  window.addEventListener("hashchange", fromHash);
+  fromHash();
+})();
+</script>
+</body>
+</html>

@@ -99,6 +99,22 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 
+_PLACEHOLDER_MARKERS = ("change-me", "changeme", "your-", "-here", "example", "placeholder")
+
+
+def _real_secret(key: str) -> str:
+    """Return a configured secret, or "" if unset or an .env.example placeholder."""
+    value = _env(key)
+    if value and any(m in value.lower() for m in _PLACEHOLDER_MARKERS):
+        logger.warning("%s still holds a placeholder value; treating it as unset.", key)
+        return ""
+    return value
+
+
+def _insecure_dev() -> bool:
+    return _bool_env("FAIREWALL_INSECURE_DEV")
+
+
 def _bool_env(key: str) -> bool:
     return _env(key).lower() in ("1", "true", "yes")
 
@@ -116,7 +132,7 @@ def _preset(platform_key: str) -> Policy:
 
 
 def _mount_zapier(app: FastAPI) -> bool:
-    secret = _env("ZAPIER_WEBHOOK_SECRET")
+    secret = _real_secret("ZAPIER_WEBHOOK_SECRET")
     if not secret:
         logger.info("Zapier adapter skipped (ZAPIER_WEBHOOK_SECRET not set).")
         return False
@@ -124,7 +140,10 @@ def _mount_zapier(app: FastAPI) -> bool:
         from fairewall.integrations.zapier import ZapierWebhookAdapter
         from fairewall.sdk import GovernanceSDK
         sdk = GovernanceSDK(policy=_preset("ZAPIER_PRESET"), platform="zapier")
-        adapter = ZapierWebhookAdapter(sdk, webhook_secret=secret, verify_signature=True)
+        adapter = ZapierWebhookAdapter(
+            sdk, webhook_secret=secret, verify_signature=True,
+            admin_key=_real_secret("FAIREWALL_API_KEY") or None,
+        )
         app.include_router(adapter.router)
         logger.info("✓  Zapier adapter mounted  →  /v1/zapier/*")
         return True
@@ -135,11 +154,16 @@ def _mount_zapier(app: FastAPI) -> bool:
 
 def _mount_copilot(app: FastAPI) -> bool:
     tenant_id = _env("COPILOT_TENANT_ID")
-    # Copilot can run without JWT validation (dev mode) but warn if no tenant
-    if not tenant_id:
-        logger.info(
-            "Copilot adapter mounting in DEV mode (COPILOT_TENANT_ID not set — JWT not validated)."
+    audience = _env("COPILOT_AUDIENCE")
+    verified = bool(tenant_id and audience)
+    if not verified and not _insecure_dev():
+        logger.warning(
+            "Copilot adapter NOT mounted: set COPILOT_TENANT_ID and COPILOT_AUDIENCE "
+            "(or FAIREWALL_INSECURE_DEV=1 for local development only)."
         )
+        return False
+    if not verified:
+        logger.warning("Copilot adapter mounted in INSECURE DEV mode: JWTs are NOT validated.")
     try:
         from fairewall.integrations.copilot import CopilotAdapter
         from fairewall.sdk import GovernanceSDK
@@ -147,7 +171,8 @@ def _mount_copilot(app: FastAPI) -> bool:
         adapter = CopilotAdapter(
             sdk,
             tenant_id=tenant_id or None,
-            validate_jwt=bool(tenant_id),
+            audience=audience or None,
+            validate_jwt=verified,
         )
         app.include_router(adapter.router)
         logger.info("✓  Copilot Studio adapter mounted  →  /v1/copilot/*")

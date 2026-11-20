@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import time
@@ -14,6 +15,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("fAIrewall proxy requires `pip install fairewall[proxy]`") from exc
 
+from ..approvals import ApprovalError, ApprovalQueue, ApprovalStatus, needs_human
 from ..audit import AuditLog
 from ..detectors import Detector
 from ..firewall import Firewall
@@ -34,6 +36,14 @@ class InspectToolPayload(BaseModel):
     session_id: Optional[str] = None
     principal_id: str = "anonymous"
     principal_roles: List[str] = Field(default_factory=list)
+    # When true, a call that needs a person is held in the approval queue and
+    # returned with allowed=false and an approval id to poll.
+    hold_for_approval: bool = False
+
+
+class ReviewPayload(BaseModel):
+    reviewer: str
+    note: str = ""
 
 
 class CommitToolPayload(BaseModel):
@@ -50,6 +60,8 @@ def create_app(
     upstream_url: Optional[str] = None,
     api_key: Optional[str] = None,
     detectors: Optional[Sequence[Detector]] = None,
+    approvals: Optional[ApprovalQueue] = None,
+    reviewer_api_key: Optional[str] = None,
 ) -> FastAPI:
     """Create a FastAPI application with firewall enforcement.
 
@@ -60,6 +72,12 @@ def create_app(
             ``X-API-Key: <key>``.  Falls back to the ``FAIREWALL_API_KEY``
             environment variable.  When neither is set the endpoints are
             unauthenticated (suitable for local development only).
+        approvals: Approval queue for held tool calls. One is created when
+            omitted. It lives in process memory.
+        reviewer_api_key: Key required to list, approve or reject held calls
+            (``/v1/approvals``). Falls back to ``FAIREWALL_REVIEWER_KEY``, then
+            to ``api_key``. Give reviewers a different key from the agent's,
+            so an agent holding the gateway key cannot approve its own calls.
     """
     if firewall is None:
         p = policy or Policy()
@@ -67,6 +85,9 @@ def create_app(
         firewall = Firewall(policy=p, audit=audit, shadow=shadow, detectors=detectors)
 
     effective_api_key = api_key or os.environ.get("FAIREWALL_API_KEY")
+    effective_reviewer_key = (reviewer_api_key or os.environ.get("FAIREWALL_REVIEWER_KEY")
+                              or effective_api_key)
+    queue = approvals if approvals is not None else ApprovalQueue(firewall)
 
     app = FastAPI(
         title="fAIrewall SDK Gateway",
@@ -78,17 +99,34 @@ def create_app(
 
     # ---------------------------------------------------------------------- auth
 
-    def _require_auth(authorization: Optional[str], x_api_key: Optional[str]) -> None:
-        """Raise HTTP 401 if the request does not carry a valid API key."""
-        if not effective_api_key:
-            return  # no key configured → open access (local dev)
+    def _supplied_key(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
         bearer = None
         if authorization:
             parts = authorization.split(" ", 1)
             if len(parts) == 2 and parts[0].lower() == "bearer":
                 bearer = parts[1]
-        supplied = bearer or x_api_key
-        if supplied != effective_api_key:
+        return bearer or x_api_key
+
+    def _key_matches(supplied: Optional[str], expected: Optional[str]) -> bool:
+        return bool(supplied and expected and hmac.compare_digest(supplied, expected))
+
+    def _require_reviewer(authorization: Optional[str], x_api_key: Optional[str]) -> None:
+        """Raise HTTP 401 unless the caller holds the reviewer key."""
+        if not effective_reviewer_key:
+            return  # no key configured: open access (local dev)
+        if not _key_matches(_supplied_key(authorization, x_api_key), effective_reviewer_key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Reviewer key required. Supply via 'Authorization: Bearer <key>' "
+                       "or 'X-API-Key: <key>'.",
+            )
+
+    def _require_auth(authorization: Optional[str], x_api_key: Optional[str]) -> None:
+        """Raise HTTP 401 if the request does not carry a valid API key."""
+        if not effective_api_key:
+            return  # no key configured → open access (local dev)
+        supplied = _supplied_key(authorization, x_api_key)
+        if not _key_matches(supplied, effective_api_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing API key. Supply via 'Authorization: Bearer <key>' "
@@ -168,16 +206,101 @@ def create_app(
         _require_auth(authorization, x_api_key)
         principal = Principal(id=payload.principal_id, roles=payload.principal_roles)
         ctx = firewall.session(session_id=payload.session_id, principal=principal)
-        decision = firewall.inspect(
-            tool=payload.tool,
-            arguments=payload.arguments,
-            ctx=ctx,
-        )
+        with firewall.session_lock(ctx.session_id):
+            decision = firewall.inspect(
+                tool=payload.tool,
+                arguments=payload.arguments,
+                ctx=ctx,
+            )
+            if payload.hold_for_approval and not firewall.shadow and needs_human(decision):
+                try:
+                    req = queue.submit(payload.tool, payload.arguments, ctx, decision)
+                except ApprovalError as exc:
+                    return {"allowed": False, "blocked": True, "decision": decision.to_dict(),
+                            "approval_error": str(exc)}
+                # Held: the caller must wait for approval, then run the tool
+                # and call /v1/commit/tool.
+                return {
+                    "allowed": False,
+                    "blocked": False,
+                    "pending_approval": True,
+                    "approval": req.to_dict(),
+                    "decision": decision.to_dict(),
+                }
         return {
             "allowed": decision.allowed,
             "blocked": decision.blocked,
             "decision": decision.to_dict(),
         }
+
+    # -------------------------------------------------------------- approvals
+
+    @app.get("/v1/approvals")
+    async def list_approvals(
+        status_filter: Optional[str] = None,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        """List held calls for reviewers. ?status_filter=pending|approved|rejected|expired."""
+        _require_reviewer(authorization, x_api_key)
+        wanted = None
+        if status_filter:
+            try:
+                wanted = ApprovalStatus(status_filter.lower())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="status_filter must be pending, approved, rejected or expired")
+        return {"approvals": [r.to_dict() for r in queue.list(wanted)]}
+
+    @app.get("/v1/approvals/{request_id}")
+    async def get_approval(
+        request_id: str,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        """Poll one request. Agents (gateway key) and reviewers (reviewer key) may read."""
+        if effective_api_key or effective_reviewer_key:
+            supplied = _supplied_key(authorization, x_api_key)
+            if not (_key_matches(supplied, effective_api_key)
+                    or _key_matches(supplied, effective_reviewer_key)):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                    detail="Invalid or missing API key.")
+        req = queue.get(request_id)
+        if req is None:
+            raise HTTPException(status_code=404, detail="No approval request with that id")
+        return req.to_dict()
+
+    def _decide(request_id: str, payload: ReviewPayload, approve: bool) -> Dict[str, Any]:
+        try:
+            decide = queue.approve if approve else queue.reject
+            req = decide(request_id, reviewer=payload.reviewer, note=payload.note)
+        except ApprovalError as exc:
+            code = 404 if "No approval request" in str(exc) else 409
+            raise HTTPException(status_code=code, detail=str(exc))
+        return req.to_dict()
+
+    @app.post("/v1/approvals/{request_id}/approve")
+    async def approve_endpoint(
+        request_id: str,
+        payload: ReviewPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        """Approve a held call. It is re-checked first; a call the policy now
+        blocks comes back with status=rejected and decided_by=fairewall."""
+        _require_reviewer(authorization, x_api_key)
+        return _decide(request_id, payload, approve=True)
+
+    @app.post("/v1/approvals/{request_id}/reject")
+    async def reject_endpoint(
+        request_id: str,
+        payload: ReviewPayload,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        _require_reviewer(authorization, x_api_key)
+        return _decide(request_id, payload, approve=False)
 
     @app.post("/v1/commit/tool")
     async def commit_tool_endpoint(

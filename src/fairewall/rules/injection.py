@@ -17,6 +17,21 @@ from typing import List, Optional, Pattern, Tuple
 from ..types import Action, Finding, Severity, Trust
 
 
+# Hard ceiling on one scanned string. Anything larger is refused outright
+# rather than scanned partially: an attack hidden in an unscanned middle is
+# worse than a legitimate long document that has to be chunked.
+MAX_SCAN_BYTES = 64 * 1024
+
+
+def is_oversize(text: str) -> bool:
+    """True when *text* exceeds MAX_SCAN_BYTES once UTF-8 encoded."""
+    if len(text) > MAX_SCAN_BYTES:
+        return True
+    if len(text) * 4 <= MAX_SCAN_BYTES:
+        return False
+    return len(text.encode("utf-8", "ignore")) > MAX_SCAN_BYTES
+
+
 @dataclass
 class Signature:
     id: str
@@ -49,8 +64,8 @@ SIGNATURES: List[Signature] = [
     ),
     _sig(
         "system_prompt_spoof",
-        r"(^|\n)\s*(\[|<|#{1,3}\s*)?\s*(system|assistant|developer)\s*"
-        r"(\]|>|:|\s+(note|message|prompt|instruction|override))",
+        r"(?:^|\n)[ \t]*(?:(?:\[|<|#{1,3})[ \t]*)?(system|assistant|developer)"
+        r"(?:[ \t]*[\]>:]|[ \t]+(?:note|message|prompt|instruction|override))",
         Severity.HIGH,
         "Content impersonates a system or developer turn.",
     ),
@@ -138,6 +153,18 @@ def scan_text(
     """
     if not text:
         return []
+
+    if is_oversize(text):
+        return [
+            Finding(
+                rule_id="injection.oversize_input",
+                action=Action.BLOCK,
+                severity=Severity.HIGH,
+                message="Input exceeds the %d-byte scan limit and was not scanned; "
+                        "split it into smaller pieces." % MAX_SCAN_BYTES,
+                evidence={"location": location, "length": len(text)},
+            )
+        ]
 
     normalized, had_invisible = _normalize(text)
     findings: List[Finding] = []

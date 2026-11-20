@@ -9,11 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .types import Context, Finding, ToolCall
+
+
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NAME_SEPARATORS = re.compile(r"[\s\-.]+")
+
+
+def normalize_tool_name(name: str) -> str:
+    """Fold case, separators and camelCase so Send_Email == send-email == sendEmail."""
+    spaced = _CAMEL_BOUNDARY.sub("_", name or "")
+    return _NAME_SEPARATORS.sub("_", spaced).strip("_").lower()
 
 
 @dataclass
@@ -91,7 +102,28 @@ class Policy:
             )
 
     def tool(self, name: str) -> Optional[ToolPolicy]:
-        return self.tools.get(name)
+        exact = self.tools.get(name)
+        if exact is not None:
+            return exact
+        wanted = normalize_tool_name(name)
+        for key, tp in self.tools.items():
+            if normalize_tool_name(key) == wanted:
+                return tp
+        return None
+
+    def canonical_tool(self, name: str) -> str:
+        """The policy's own spelling when one matches, else the normalized name.
+
+        Rules key rate limits and budgets on the tool name, so every spelling of
+        one tool must collapse to one key or renaming becomes a bypass.
+        """
+        if name in self.tools:
+            return name
+        wanted = normalize_tool_name(name)
+        for key in self.tools:
+            if normalize_tool_name(key) == wanted:
+                return key
+        return wanted or name
 
     def risk_tier(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
         """Resolve a tool's risk tier from declared policy, never from prompt text.

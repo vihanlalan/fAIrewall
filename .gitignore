@@ -65,3 +65,6 @@ venv.bak/
 *.log
 *.jsonl
 data/
+gstack/
+
+tools/_cache/

@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from .approvals import ApprovalQueue
 from .audit import AuditLog, ChainVerification
 from .detectors import Detector
 from .firewall import Firewall
@@ -128,6 +129,7 @@ class GovernanceSDK:
         )
         # Per-session counters (call_count, blocked, allowed, flagged)
         self._session_stats: Dict[str, Dict[str, int]] = {}
+        self._approvals: Optional[ApprovalQueue] = None
 
     # ------------------------------------------------------------------
     # Factory helpers
@@ -414,6 +416,17 @@ class GovernanceSDK:
     def audit(self) -> AuditLog:
         """Direct access to the underlying :class:`~fairewall.audit.AuditLog`."""
         return self._fw.audit
+
+    @property
+    def approvals(self) -> ApprovalQueue:
+        """Human approval queue bound to this SDK's firewall (created on first use).
+
+        ``sdk.approvals.run(name, fn, args)`` holds calls that need a person;
+        ``sdk.approvals.approve_and_run(request_id, reviewer=...)`` runs them.
+        """
+        if self._approvals is None:
+            self._approvals = ApprovalQueue(self._fw)
+        return self._approvals
 
     @property
     def firewall(self) -> Firewall:

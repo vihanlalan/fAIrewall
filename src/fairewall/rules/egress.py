@@ -17,9 +17,10 @@ from urllib.parse import urlparse
 
 from ..policy import Policy, Rule
 from ..types import Action, Context, Finding, Severity, ToolCall
+from .injection import MAX_SCAN_BYTES, is_oversize
 
 _URL = re.compile(r"https?://([^/\s\"'<>)\]]+)", re.IGNORECASE)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24})")
 
 # Shapes that are credentials regardless of what they are called.
 _SECRETS: List[Tuple[str, re.Pattern, Severity]] = [
@@ -104,6 +105,18 @@ class EgressRule(Rule):
     def evaluate(self, call: ToolCall, ctx: Context, policy: Policy) -> List[Finding]:
         findings: List[Finding] = []
         for path, text in _strings(call.arguments):
+            if is_oversize(text):
+                findings.append(
+                    Finding(
+                        rule_id="egress.oversize_argument",
+                        action=Action.BLOCK,
+                        severity=Severity.HIGH,
+                        message="Argument %s exceeds the %d-byte scan limit and was not "
+                                "scanned." % (path or "<root>", MAX_SCAN_BYTES),
+                        evidence={"argument": path, "length": len(text)},
+                    )
+                )
+                continue
             findings.extend(self._check_destinations(path, text, policy))
             findings.extend(self._check_secrets(path, text))
             findings.extend(self._check_bulk_pii(path, text))

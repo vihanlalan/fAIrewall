@@ -122,6 +122,48 @@ print(decision.allowed)
 
 ---
 
+## 📊 Shadow-Mode Report: How Much Review Could You Skip?
+
+If a person checks every action your AI agents take, this shows how much of that could run on its own, how much still needs a person, and what should never have run. It replays a tool-call log. **Nothing is executed.**
+
+```bash
+# 1. Make a SYNTHETIC demo log (invented data, clearly stamped as such)
+fairewall simulate --count 2000 -o demo_log.jsonl
+
+# 2. Replay it. --minutes-per-review is YOUR estimate; there is no default.
+fairewall report demo_log.jsonl --minutes-per-review 3
+```
+
+For your own agents, write one JSON object per line:
+`{"session_id": "run-42", "tool": "send_email", "arguments": {"to": "a@b.com"}}`
+(add `"untrusted_input": "<text the agent read>"` before a call to mark that session as having read outside content), then run `fairewall report your_log.jsonl --policy policy.json --minutes-per-review 3`.
+
+The simulator's attacks are random, not a fixed list: each run builds new attacks from large phrase pools, then applies random disguises (typos, look-alike letters, hidden characters, encodings, other languages, burying them in normal text) and structural tricks (nested amounts, split refunds). Each run gets a fresh seed, printed in the log header, so a run can be reproduced. The report prints how many attacks **got through**. `fairewall report ... --detector learned` adds the trained text scorer. To measure the scorer yourself: `python tools/train_detector.py` (hand-picked weights vs. learned, on public data) and `python tools/eval_adversary.py` (many random seeds).
+
+Buckets: **auto-approved** (no human needed), **human review** (tools you marked `require_human_approval`), **blocked** (would have been refused). "Hours saved" is auto-approved calls x your minutes, printed as an estimate. Reports built from the simulator are stamped SYNTHETIC; the percentages against its author-written labels are a tuning signal, not a measured false-positive rate.
+
+### Preview a policy change before you ship it
+
+`fairewall diff` replays the same log under your current policy and a proposed one, and lists every call whose verdict would change. Nothing is executed.
+
+```bash
+fairewall diff policy.json policy_new.json your_log.jsonl
+```
+
+```
+                      old      new   change
+  AUTO-APPROVED       317      325       +8
+  HUMAN REVIEW         42        0      -42
+  BLOCKED             141      175      +34
+
+Verdict changed on 76 calls: 34 stricter, 42 LOOSER
+  Looser = the new policy lets through something the old one stopped. Read these first.
+```
+
+Each policy argument is a file or a preset name (`ZAPIER_SME`, ...). Example calls are listed looser-first with the rules that started or stopped firing. Add `--fail-on-looser` to exit 1 when the new policy loosens anything, so the command can gate a CI pipeline. `--json` gives the full result.
+
+---
+
 ## 🗺️ What Is This? (One Paragraph)
 
 fAIrewall is a Python SDK that puts a **deterministic security layer** around AI agents. Before an agent can send an email, process a payment, approve an invoice, or write to a database — fAIrewall checks it against a policy: *Is the session tainted? Is the amount over the ceiling? Does this tool require human approval?* The decision is made in **<1 ms**, with no LLM calls, and every decision is written to a tamper-evident audit log. It ships with ready-made policy presets for five of the most popular enterprise AI platforms.
@@ -456,9 +498,59 @@ fairewall verify-audit audit.jsonl
 # Generate a policy template
 fairewall init-policy --format json -o policy.json
 
-# Run the HTTP gateway
-fairewall serve --host 127.0.0.1 --port 8000
+# Run the HTTP gateway (separate reviewer key for the approval queue)
+fairewall serve --host 127.0.0.1 --port 8000 --api-key AGENT_KEY --reviewer-key REVIEWER_KEY
+
+# Replay a log under two policies and list changed verdicts
+fairewall diff policy.json policy_new.json log.jsonl --fail-on-looser
 ```
+
+---
+
+## 🖥️ Live Demo Page
+
+```bash
+pip install -e ".[proxy]"
+fairewall demo            # then open http://127.0.0.1:8080/demo
+```
+
+A browser page for showing fAIrewall to people who will not read code. Every verdict comes from the real engine; only the tools are stubs, so nothing is sent or paid. Five tabs:
+
+1. **Live attacks**: six scenarios (invoice reminder, vendor contract, email hijack, secret-key leak, runaway loop, two refunds against one budget), each with the verdict, the rule that decided it and the decision time.
+2. **Approval queue**: approve or reject escalated calls; approving both refunds shows the re-check rejecting the second one.
+3. **Shadow-mode report**: replay a synthetic log and see the auto / review / blocked split and the estimated review hours saved.
+4. **Policy diff**: move the refund cap and see which calls would change verdict.
+5. **Audit log**: the hash chain, plus a button that tampers with a copy of one record and shows verification failing there.
+
+Deep links open a tab directly, e.g. `/demo#attacks/hijack`, `/demo#report`. **Reset demo** clears all state. The demo endpoints have no authentication, so keep it on localhost unless you mean to publish it.
+
+---
+
+## ✋ Human Approval Queue
+
+A FLAG on its own only labels a call. With the approval queue, a call that needs a person **waits** until someone approves or rejects it.
+
+```python
+from fairewall import GovernanceSDK, ApprovalRequest
+
+sdk = GovernanceSDK.from_preset("ZAPIER_SME")
+outcome = sdk.approvals.run("send_contract", send_contract, {"customer": "Priya"},
+                            session_id="run-42")
+if isinstance(outcome, ApprovalRequest):         # held, nothing has run
+    print(outcome)                                # PENDING HUMAN APPROVAL (request ...)
+
+# later, from your review screen
+result = sdk.approvals.approve_and_run(outcome.id, reviewer="finance-lead")
+# or: sdk.approvals.reject(outcome.id, reviewer="finance-lead", note="wrong template")
+```
+
+- **What is held:** FLAG decisions, and calls blocked only because the tool has `require_human_approval`. Hard blocks (injection, over-limit spend, unapproved destination) stay blocked: a reviewer cannot approve what the policy forbids.
+- **Re-checked on approval:** state can change while a call waits. If another call used up the budget, or the session read untrusted content, the approval is turned into a rejection by `fairewall` and nothing runs.
+- **Audited:** request, approval, rejection and expiry go into the hash-chained audit log with the reviewer's name. A principal cannot approve its own request.
+- **Expiry:** requests expire after one hour by default (`ApprovalQueue(fw, ttl_seconds=...)`).
+- **Limits:** the queue is in process memory, so pending requests are lost on restart (the audit log keeps the record). Shadow mode never holds calls.
+
+Over HTTP, send `"hold_for_approval": true` to `/v1/inspect/tool`. A held call comes back with `"pending_approval": true` and an approval id. Poll `GET /v1/approvals/{id}`; once it is `approved`, run the tool and call `/v1/commit/tool`.
 
 ---
 
@@ -476,6 +568,10 @@ uvicorn fairewall.proxy:app --host 0.0.0.0 --port 8000
 | `POST /v1/inspect/input` | Screen inbound text |
 | `POST /v1/inspect/tool` | Evaluate candidate tool call |
 | `POST /v1/commit/tool` | Advance budgets after execution |
+| `GET  /v1/approvals` | List held calls (reviewer key; `?status_filter=pending`) |
+| `GET  /v1/approvals/{id}` | Poll one held call (agent or reviewer key) |
+| `POST /v1/approvals/{id}/approve` | Approve, after a policy re-check (reviewer key) |
+| `POST /v1/approvals/{id}/reject` | Reject (reviewer key) |
 | `GET  /v1/audit/verify` | Audit chain verification |
 | `POST /v1/chat/completions` | Intercepting reverse proxy |
 | `POST /v1/zapier/action` | Zapier action governance |

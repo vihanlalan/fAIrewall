@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------- non-root user ----------
 RUN useradd --create-home --shell /bin/bash fairewall
 WORKDIR /app
+RUN mkdir -p /app/data && chown -R fairewall:fairewall /app
 USER fairewall
 
 # ---------- Python deps ----------
@@ -25,8 +26,7 @@ ENV FAIREWALL_HOST=0.0.0.0
 ENV FAIREWALL_PORT=8000
 ENV FAIREWALL_AUDIT_PATH=/app/data/audit.jsonl
 
-# Persistent audit log directory (mount as a volume)
-RUN mkdir -p /app/data
+# Persistent audit log directory (/app/data, created above; mount as a volume)
 
 EXPOSE 8000
 
