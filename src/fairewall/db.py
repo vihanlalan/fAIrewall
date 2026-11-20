@@ -138,6 +138,21 @@ def _behind_pooler(url: str) -> bool:
     return "-pooler." in host or "pgbouncer" in host
 
 
+def _pg_timeouts() -> str:
+    """Per-transaction safety limits, so one stuck caller can never wedge every other request.
+
+    - lock_timeout: waiting for a store's lock fails after FAIREWALL_DB_LOCK_TIMEOUT_MS (15 s)
+      instead of hanging.
+    - idle_in_transaction_session_timeout: a transaction left open by a caller that froze or died
+      (a serverless instance suspended mid-request) is ended by Postgres after
+      FAIREWALL_DB_IDLE_TX_TIMEOUT_MS (60 s), releasing its locks.
+    """
+    lock_ms = int(os.environ.get("FAIREWALL_DB_LOCK_TIMEOUT_MS", "15000"))
+    idle_ms = int(os.environ.get("FAIREWALL_DB_IDLE_TX_TIMEOUT_MS", "60000"))
+    return ("SET LOCAL lock_timeout = %d; SET LOCAL idle_in_transaction_session_timeout = %d;"
+            % (lock_ms, idle_ms))
+
+
 class InlinePool:
     """A connection pool with no background threads, for serverless hosts (Vercel).
 
@@ -283,7 +298,7 @@ class Database:
             digest = hashlib.sha256(("fairewall:" + self.schema).encode()).digest()
             self._lock_key = int.from_bytes(digest[:8], "big", signed=True)
             with _pool(self.location).connection() as conn:
-                conn.execute("BEGIN")
+                conn.execute("BEGIN; " + _pg_timeouts())
                 try:
                     conn.execute("SELECT pg_advisory_xact_lock(%s)", (self._lock_key,))
                     conn.execute('CREATE SCHEMA IF NOT EXISTS "%s"' % self.schema)
@@ -345,8 +360,8 @@ class Database:
         """
         if self.dialect == "postgres":
             with _pool(self.location).connection() as conn:
-                conn.execute('BEGIN; SET LOCAL search_path TO "%s"; SELECT pg_advisory_xact_lock(%d)'
-                             % (self.schema, self._key_for(lock)))
+                conn.execute('BEGIN; %s SET LOCAL search_path TO "%s"; SELECT pg_advisory_xact_lock(%d)'
+                             % (_pg_timeouts(), self.schema, self._key_for(lock)))
                 try:
                     yield _PgCursor(conn)
                 except BaseException:

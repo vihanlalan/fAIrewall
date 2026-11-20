@@ -991,6 +991,17 @@ def _data_from_env() -> str:
     return os.environ.get("LAB_DATA_DIR", "lab-data")
 
 
+def _limits_from_env() -> Dict[str, int]:
+    """Per-sandbox and global hourly caps, e.g. LAB_RUNS_PER_HOUR=200 (defaults in Lab.__init__)."""
+    out = {}
+    for key in ("runs_per_hour", "live_per_hour", "armor_per_hour", "global_live_per_hour",
+                "global_armor_per_hour"):
+        raw = os.environ.get("LAB_" + key.upper(), "").strip()
+        if raw.isdigit():
+            out[key] = int(raw)
+    return out
+
+
 def _environment_from_env() -> str:
     if os.environ.get("LAB_ENVIRONMENT"):
         return os.environ["LAB_ENVIRONMENT"]
@@ -1065,4 +1076,5 @@ def from_env() -> Lab:
     return Lab(data, live_client=live, model_armor=armor, gateway_urls=gateways,
                gateway_key=os.environ.get("FAIREWALL_API_KEY", ""),
                anchor_backends=_anchor_backends_from_env(verify=True) or None,
+               limits=_limits_from_env(),
                environment=_environment_from_env())
