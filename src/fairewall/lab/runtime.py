@@ -974,7 +974,7 @@ class Lab:
                 "limits": [{"layer": a, "limit": b} for a, b in fx.HONEST_LIMITS]}
 
     def status(self) -> Dict[str, Any]:
-        return {"environment": self.environment, "gemini": getattr(self.live, "backend", None) if self.live else None,
+        return {"environment": self.environment, "build": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("K_REVISION") or "local")[:12], "gemini": getattr(self.live, "backend", None) if self.live else None,
                 "gemini_model": getattr(self.live, "model", None) if self.live else None,
                 "model_armor": getattr(self.armor, "template", None) if self.armor else None,
                 "gateways": [{"name": g.name, "mode": g.mode} for g in self.gateways],

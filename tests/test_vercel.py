@@ -96,3 +96,29 @@ def test_serverless_uses_a_thread_free_pool_rebuilt_after_fork(monkeypatch):
         db._POOLS.pop(url, None)
     monkeypatch.delenv("VERCEL")
     assert not db._inline_pool_wanted()
+
+
+def test_inline_pool_recovers_from_a_connection_that_died_while_idle(monkeypatch):
+    import os
+    url = os.environ.get("FAIREWALL_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("needs FAIREWALL_TEST_POSTGRES_URL")
+    import psycopg
+    from fairewall import db
+    monkeypatch.setenv("FAIREWALL_DB_POOL_MODE", "inline")
+    target = db.with_schema(url, "pool_recovery")
+    store = db.Database(target, schema="pool_recovery")
+    with store.transaction() as cur:
+        cur.execute("SELECT 1")
+    pool = db._pool(store.location)
+    assert isinstance(pool, db.InlinePool) and pool._idle
+    victim = pool._idle[-1][0]
+    with psycopg.connect(url, autocommit=True) as admin:  # the server drops it, as a dead socket would
+        admin.execute("SELECT pg_terminate_backend(%s)", (victim.info.backend_pid,))
+    with store.transaction() as cur:  # transparently retried on a fresh connection
+        assert cur.execute("SELECT 41 + 1 AS n").fetchone()["n"] == 42
+    monkeypatch.setenv("FAIREWALL_DB_IDLE_REUSE_S", "0")
+    stale = pool._idle[-1][0]
+    with store.transaction() as cur:  # anything idle past the limit is replaced, not reused
+        cur.execute("SELECT 1")
+    assert stale.closed

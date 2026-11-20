@@ -150,8 +150,9 @@ def _pg_timeouts() -> str:
     """
     lock_ms = int(os.environ.get("FAIREWALL_DB_LOCK_TIMEOUT_MS", "15000"))
     idle_ms = int(os.environ.get("FAIREWALL_DB_IDLE_TX_TIMEOUT_MS", "60000"))
-    return ("SET LOCAL lock_timeout = %d; SET LOCAL idle_in_transaction_session_timeout = %d;"
-            % (lock_ms, idle_ms))
+    stmt_ms = int(os.environ.get("FAIREWALL_DB_STATEMENT_TIMEOUT_MS", "30000"))
+    return ("SET LOCAL lock_timeout = %d; SET LOCAL idle_in_transaction_session_timeout = %d; "
+            "SET LOCAL statement_timeout = %d;" % (lock_ms, idle_ms, stmt_ms))
 
 
 class InlinePool:
@@ -160,8 +161,14 @@ class InlinePool:
     psycopg_pool opens connections from worker threads. A serverless runtime may start the app,
     then fork or snapshot the process to serve requests; the workers do not come along, so every
     request would wait for a connection that never arrives (PoolTimeout). Here the requesting
-    thread opens connections itself, checks an idle one before reuse, and the pool is rebuilt
-    whenever the process id changes.
+    thread opens connections itself, and the pool is rebuilt whenever the process id changes.
+
+    A serverless instance is suspended between requests, and a connection idle across a
+    suspension can be dead without either side being told: a query on it would wait forever.
+    So connections idle longer than FAIREWALL_DB_IDLE_REUSE_S (10 s) are discarded rather than
+    reused, sockets carry TCP keepalives and a send timeout (a dead peer errors in ~15 s instead
+    of hanging), and a reused connection that fails on BEGIN is replaced once, transparently:
+    nothing has run yet at that point, so the retry is safe.
 
     It never makes a caller wait for a slot. One request can hold a transaction on one store while
     it opens another, so a capped pool deadlocks as soon as a few requests do that at once (each
@@ -177,35 +184,45 @@ class InlinePool:
 
     def _connect(self) -> Any:
         import psycopg  # type: ignore
-        return psycopg.connect(self.url, connect_timeout=10, **self.kwargs)
+        return psycopg.connect(self.url, connect_timeout=10, keepalives=1, keepalives_idle=5,
+                               keepalives_interval=3, keepalives_count=3, tcp_user_timeout=15000,
+                               **self.kwargs)
 
-    def _usable(self, conn: Any, idle_s: float) -> bool:
-        if conn.closed or conn.broken:
-            return False
-        if idle_s < 30:
-            return True  # recently used: skip the extra round trip
+    @staticmethod
+    def _discard(conn: Any) -> None:
         try:
-            conn.execute("SELECT 1")
-            return True
+            conn.close()
         except Exception:
-            return False
+            pass
+
+    def _checkout(self) -> Any:
+        """A connection used within the last few seconds, or a new one."""
+        max_idle = float(os.environ.get("FAIREWALL_DB_IDLE_REUSE_S", "10"))
+        while True:
+            with self._lock:
+                candidate, since = self._idle.pop() if self._idle else (None, 0.0)
+            if candidate is None:
+                return self._connect(), False
+            if not (candidate.closed or candidate.broken) and time.monotonic() - since <= max_idle:
+                return candidate, True
+            self._discard(candidate)
 
     @contextmanager
-    def connection(self) -> Iterator[Any]:
+    def connection(self, begin: Optional[str] = None) -> Iterator[Any]:
         conn = None
         try:
-            while conn is None:
-                with self._lock:
-                    candidate, since = self._idle.pop() if self._idle else (None, 0.0)
-                if candidate is None:
+            conn, reused = self._checkout()
+            if begin is not None:
+                try:
+                    conn.execute(begin)
+                except Exception:
+                    if not (reused and (conn.closed or conn.broken)):
+                        raise
+                    # The reused connection was dead. Nothing ran yet: start over on a new one.
+                    self._discard(conn)
+                    conn = None
                     conn = self._connect()
-                elif self._usable(candidate, time.monotonic() - since):
-                    conn = candidate
-                else:
-                    try:
-                        candidate.close()
-                    except Exception:
-                        pass
+                    conn.execute(begin)
             yield conn
         except BaseException:
             if conn is not None:
@@ -241,6 +258,18 @@ class InlinePool:
                 conn.close()
             except Exception:
                 pass
+
+
+@contextmanager
+def _begin(pool: Any, sql: str) -> Iterator[Any]:
+    """A pooled connection with ``sql`` (BEGIN ...) already run on it."""
+    if isinstance(pool, InlinePool):
+        with pool.connection(begin=sql) as conn:
+            yield conn
+        return
+    with pool.connection() as conn:
+        conn.execute(sql)
+        yield conn
 
 
 def _inline_pool_wanted() -> bool:
@@ -306,8 +335,7 @@ class Database:
                                  "(got %r)" % self.schema)
             digest = hashlib.sha256(("fairewall:" + self.schema).encode()).digest()
             self._lock_key = int.from_bytes(digest[:8], "big", signed=True)
-            with _pool(self.location).connection() as conn:
-                conn.execute("BEGIN; " + _pg_timeouts())
+            with _begin(_pool(self.location), "BEGIN; " + _pg_timeouts()) as conn:
                 try:
                     conn.execute("SELECT pg_advisory_xact_lock(%s)", (self._lock_key,))
                     conn.execute('CREATE SCHEMA IF NOT EXISTS "%s"' % self.schema)
@@ -368,9 +396,9 @@ class Database:
         write lock, which is at least as strict.
         """
         if self.dialect == "postgres":
-            with _pool(self.location).connection() as conn:
-                conn.execute('BEGIN; %s SET LOCAL search_path TO "%s"; SELECT pg_advisory_xact_lock(%d)'
-                             % (_pg_timeouts(), self.schema, self._key_for(lock)))
+            with _begin(_pool(self.location), 'BEGIN; %s SET LOCAL search_path TO "%s"; '
+                        'SELECT pg_advisory_xact_lock(%d)'
+                        % (_pg_timeouts(), self.schema, self._key_for(lock))) as conn:
                 try:
                     yield _PgCursor(conn)
                 except BaseException:
