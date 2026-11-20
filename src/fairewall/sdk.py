@@ -417,6 +417,17 @@ class GovernanceSDK:
         """Direct access to the underlying :class:`~fairewall.audit.AuditLog`."""
         return self._fw.audit
 
+    def durable_actions(self, database, actions, *, ttl=3600):
+        """Open a durable action domain with this SDK's policy and detectors.
+
+        Use store.screen and store.submit for its persisted session state.
+        """
+        from .actions import ActionStore
+        if self._fw.shadow:
+            raise ValueError("Durable action dispatch requires enforcement mode")
+        return ActionStore(database, self.policy, actions, audit=self.audit,
+                           detectors=self._fw.detectors, ttl=ttl)
+
     @property
     def approvals(self) -> ApprovalQueue:
         """Human approval queue bound to this SDK's firewall (created on first use).

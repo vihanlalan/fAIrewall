@@ -30,6 +30,24 @@ jobs:
       - name: Run tests
         run: pytest -v tests
 
+  policy-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check policy fixtures from a clean package install
+        run: |
+          python -m pip install ".[dev]"
+          cd "$RUNNER_TEMP"
+          fairewall policy-suite "$GITHUB_WORKSPACE/examples/refunds/policy.json" "$GITHUB_WORKSPACE/examples/refunds/suite.json" --target both --junit policy-suite.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: policy-suite
+          path: ${{ runner.temp }}/policy-suite.xml
+
   lint:
     name: "Lint"
     runs-on: ubuntu-latest

@@ -43,6 +43,15 @@ class VelocityRule(Rule):
             return deque()
         return window
 
+    def snapshot_session(self, session_id):
+        now = self._clock()
+        return [[tool, list(window)] for sid, tool in list(self._windows)
+                if sid == session_id and (window := self._window((sid, tool), now))]
+
+    def restore_session(self, session_id, state):
+        for tool, times in state or []:
+            self._windows[(session_id, tool)] = deque(times)
+
     def prune_stale_windows(self) -> None:
         """Evict all windows that have no timestamps within the current window.
 

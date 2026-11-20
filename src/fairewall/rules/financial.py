@@ -76,6 +76,14 @@ class FinancialRule(Rule):
         with self._lock:
             return self._session_spend[session_id]
 
+    def snapshot_session(self, session_id):
+        return self.session_spend(session_id)
+
+    def restore_session(self, session_id, state):
+        if state is not None:
+            with self._lock:
+                self._session_spend[session_id] = state
+
     def _amounts(self, call: ToolCall, policy: Policy) -> Dict[str, Tuple[str, Optional[float], Any]]:
         """Every spend field in the call, at any depth: path -> (field name, amount, raw).
 

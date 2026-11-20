@@ -1,0 +1,7 @@
+[
+  {"name":"read order","tool":"lookup_order","arguments":{"order":"demo-1"},"expect":"allow","rules":[]},
+  {"name":"external intake","text":"The parcel arrived yesterday.","expect":"allow","rules":[]},
+  {"name":"tainted refund","tool":"refund","arguments":{"order":"demo-1","amount":40},"expect":"block","rules":["schema.human_approval_required","taint.untrusted_context"]},
+  {"name":"verified refund held","session":"verified","tool":"refund","arguments":{"order":"demo-1","amount":40},"expect":"block","rules":["schema.human_approval_required"]},
+  {"name":"ceiling","session":"verified","tool":"refund","arguments":{"order":"demo-1","amount":140},"expect":"block","rules":["financial.transaction_limit","schema.human_approval_required"]}
+]

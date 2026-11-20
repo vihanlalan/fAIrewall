@@ -496,6 +496,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rep.set_defaults(func=cmd_report)
 
     # diff
+    from .suite import command as policy_suite
+    suite = subparsers.add_parser("policy-suite", help="Run ordered policy fixtures and emit JUnit")
+    suite.add_argument("policy")
+    suite.add_argument("suite")
+    suite.add_argument("--target", choices=("sdk", "gateway", "both"), default="sdk")
+    suite.add_argument("--junit")
+    suite.set_defaults(func=policy_suite)
+
     p_diff = subparsers.add_parser(
         "diff", help="Preview a policy change: replay a log under OLD and NEW, list changed verdicts")
     p_diff.add_argument("old", help="Current policy: a JSON/YAML file or a preset name")

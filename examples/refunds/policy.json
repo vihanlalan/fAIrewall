@@ -1,0 +1,15 @@
+{
+  "version": "refund-review-v1",
+  "default_deny": true,
+  "max_spend_per_transaction": 100,
+  "max_spend_per_session": 150,
+  "tools": {
+    "refund": {
+      "required_args": ["order", "amount"],
+      "allowed_args": ["order", "amount"],
+      "forbid_when_tainted": true,
+      "require_human_approval": true
+    },
+    "lookup_order": {"allowed_args": ["order"]}
+  }
+}

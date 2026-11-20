@@ -654,3 +654,58 @@ pytest tests/test_sdk.py tests/test_integrations_*.py -v
 ## 📄 License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+## Durable action approvals and MCP
+
+Install the optional action runtime with `pip install "fairewall[actions]"`. For the HTTP action and MCP server, install `fairewall[mcp]`. Run the synthetic refund walkthrough from the checkout.
+
+```bash
+python examples/refunds/workflow.py
+fairewall policy-suite examples/refunds/policy.json examples/refunds/suite.json
+# Install .[dev] for the HTTP fixture runner.
+fairewall policy-suite examples/refunds/policy.json examples/refunds/suite.json --target both --junit results.xml
+```
+
+The workflow screens an external message, blocks a tainted refund and an over-limit refund, releases a verified refund after reopening the database, and replays all three requests under a proposed policy. A suite contains an ordered JSON array. Each step supplies a session, a text or tool input, an expected action and the exact rule IDs expected to fire. The SDK and gateway targets start with independent, empty sessions. Exit code 1 indicates a verdict or rule mismatch. The existing `diff --fail-on-looser` command gates changes in review requirements.
+
+### Register and serve business actions
+
+```python
+import os
+from fairewall import GovernanceSDK, Principal
+from fairewall.actions import RegisteredAction
+from fairewall.integrations.mcp import create_action_app
+
+def lookup(arguments, idempotency_key):
+    return {"order": arguments["order"], "status": "received"}
+
+definition = {
+    "name": "lookup_order", "description": "Read a synthetic order",
+    "inputSchema": {"type": "object", "properties": {"order": {"type": "string"}},
+                    "required": ["order"], "additionalProperties": False},
+}
+sdk = GovernanceSDK.from_policy_file("examples/refunds/policy.json")
+store = sdk.durable_actions("orders.sqlite", [
+    RegisteredAction("order-service", definition, "v1", lookup),
+])
+app = create_action_app(store,
+    agents={os.environ["AGENT_KEY"]: Principal("returns-desk")},
+    reviewers={os.environ["REVIEW_KEY"]: "finance-reviewer"})
+```
+
+Serve the ASGI app with Uvicorn, or mount it under a prefix on the existing FastAPI gateway. Agent and reviewer credentials are distinct bearer tokens. Use one authenticated principal per agent and the same database, registry and policy configuration for all workers. The database stores full arguments and screened results. Restrict its filesystem permissions to the service account. Durable sessions keep their own spend, rate and taint state. Use `store.screen` or `POST /intake` for external content entering these sessions. The existing `sdk.approvals` queue supports ephemeral Python callbacks.
+
+| Operation | Endpoint | Input |
+| --- | --- | --- |
+| Screen external intake | `POST /intake` | Agent sends `session` and `text` |
+| Submit an action | `POST /actions` | Agent sends `session`, `tool`, `arguments`, and a stable `idempotency_key` |
+| Read the outcome and history | `GET /actions/{id}` | Owning agent credential |
+| Inspect pending definitions and arguments | `GET /reviews` | Reviewer credential |
+| Release or reject | `POST /reviews/{id}` | Reviewer sends `{"approve": true}` or `{"approve": false}` |
+| Discover and call registered tools | `POST /mcp` | MCP JSON-RPC over HTTP, protocol 2025-06-18 |
+
+First use and changes to the server identity, tool definition, or handler revision require review. Increment the revision when handler behavior changes. Reviewers see the definition and canonical arguments. A release rechecks policy, validates the arguments against the registered JSON Schema, reserves the session budget, and records a durable dispatch before invoking the handler. A subsequent request can use the approved definition subject to current policy. Definition changes invalidate earlier pending approvals even if the old schema is later restored.
+
+MCP callers can set `params._meta["fairewall/session"]` and `params._meta["fairewall/idempotencyKey"]`. Supply the same key for retries of one business operation. The handler receives the durable action ID as its downstream idempotency key. Use it when issuing the external request. A delivery exception leaves the action `uncertain`. A process interruption can leave it `dispatching`. Both statuses hold further dispatches for that session pending operator reconciliation with the downstream system.
+
+After stopping the dispatch worker and verifying the outcome at the downstream service, a trusted operator can call `store.reconcile(action_id, operator, receipt_reference, executed=True, result=verified_result)`. Use `executed=False` for a confirmed non-execution. Both outcomes release the session hold and retain the original budget reservation. The action history records the resolution without sending the action again.
