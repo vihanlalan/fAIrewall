@@ -1,0 +1,69 @@
+{
+  "run_id": "run_13bda1b813ba40a6",
+  "status": "completed",
+  "source": "recorded",
+  "model": "recorded-script",
+  "scenario": "refund_40",
+  "message": "Customer on ORD-1001 says the blender arrived cracked and wants $40 back.",
+  "final_text": "Refunded $40.00 on ORD-1001 after finance approved it. Receipt: rf_562d609399784f29.",
+  "action_id": "562d609399784f298a46583956968184",
+  "reason_codes": [
+    "schema.human_approval_required"
+  ],
+  "receipt": "rf_562d609399784f29",
+  "ledger_effect": {
+    "changed": true,
+    "type": "refund",
+    "order_id": "ORD-1001",
+    "amount_cents": 4000,
+    "receipt": "rf_562d609399784f29"
+  },
+  "policy_version": "refund-review-v2 (aff7f6da9333)",
+  "model_latency_ms": 0.1,
+  "policy_latency_ms": 10.529,
+  "turns": 3,
+  "awaiting_action_id": null,
+  "actions": [
+    {
+      "action_id": "aead87f26f6244d79a354b4f14bacd21",
+      "tool": "lookup_order",
+      "status": "executed",
+      "reason_codes": [],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": null,
+      "order_id": "ORD-1001",
+      "amount_cents": null,
+      "explanation": "",
+      "policy_latency_ms": 4.424
+    },
+    {
+      "action_id": "562d609399784f298a46583956968184",
+      "tool": "refund",
+      "status": "executed",
+      "reason_codes": [
+        "schema.human_approval_required"
+      ],
+      "receipt": "rf_562d609399784f29",
+      "ledger_effect": {
+        "changed": true,
+        "type": "refund",
+        "order_id": "ORD-1001",
+        "amount_cents": 4000,
+        "receipt": "rf_562d609399784f29"
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": "finance-reviewer",
+      "order_id": "ORD-1001",
+      "amount_cents": 4000,
+      "explanation": "refunds need finance approval",
+      "policy_latency_ms": 6.105
+    }
+  ],
+  "error": null,
+  "created_at": 1795168141.698835,
+  "updated_at": 1795168141.8215098
+}

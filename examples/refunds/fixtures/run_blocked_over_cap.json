@@ -1,0 +1,63 @@
+{
+  "run_id": "run_f3157316bbe44975",
+  "status": "completed",
+  "source": "recorded",
+  "model": "recorded-script",
+  "scenario": "refund_over_cap",
+  "message": "Customer on ORD-1001 wants $140 back.",
+  "final_text": "I couldn't refund $140.00 on ORD-1001: it is over the $100.00 limit for a single refund. Nothing was refunded; a smaller amount can go to finance for approval.",
+  "action_id": "d2753404c2084596989cec431ae5bf1a",
+  "reason_codes": [
+    "schema.human_approval_required",
+    "financial.transaction_limit"
+  ],
+  "receipt": null,
+  "ledger_effect": {
+    "changed": false
+  },
+  "policy_version": "refund-review-v2 (aff7f6da9333)",
+  "model_latency_ms": 0.1,
+  "policy_latency_ms": 11.597,
+  "turns": 3,
+  "awaiting_action_id": null,
+  "actions": [
+    {
+      "action_id": "3d2c08beb10a4833a6424173a52480ae",
+      "tool": "lookup_order",
+      "status": "executed",
+      "reason_codes": [],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": null,
+      "order_id": "ORD-1001",
+      "amount_cents": null,
+      "explanation": "",
+      "policy_latency_ms": 11.518
+    },
+    {
+      "action_id": "d2753404c2084596989cec431ae5bf1a",
+      "tool": "refund",
+      "status": "blocked",
+      "reason_codes": [
+        "schema.human_approval_required",
+        "financial.transaction_limit"
+      ],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": null,
+      "order_id": "ORD-1001",
+      "amount_cents": 14000,
+      "explanation": "over the $100.00 limit for a single refund",
+      "policy_latency_ms": 0.079
+    }
+  ],
+  "error": null,
+  "created_at": 1795168141.86176,
+  "updated_at": 1795168141.9335568
+}

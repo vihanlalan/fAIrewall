@@ -1,0 +1,61 @@
+{
+  "run_id": "run_8316198c200c4dda",
+  "status": "needs_reconciliation",
+  "source": "recorded",
+  "model": "recorded-script",
+  "scenario": "refund_40",
+  "message": "Refund $40 on ORD-1001.",
+  "final_text": "I can't confirm whether this went through: the system that carries it out did not answer. It has been marked for reconciliation and will not be sent again automatically. Please don't tell the customer it is done until it has been confirmed.",
+  "action_id": "b94aadafe90b4e9fb1cd1da9d163a8bd",
+  "reason_codes": [
+    "schema.human_approval_required"
+  ],
+  "receipt": null,
+  "ledger_effect": {
+    "changed": false
+  },
+  "policy_version": "refund-review-v2 (aff7f6da9333)",
+  "model_latency_ms": 0.1,
+  "policy_latency_ms": 19.083,
+  "turns": 2,
+  "awaiting_action_id": "b94aadafe90b4e9fb1cd1da9d163a8bd",
+  "actions": [
+    {
+      "action_id": "821c5debaa9c46528332f0bec73df83d",
+      "tool": "lookup_order",
+      "status": "executed",
+      "reason_codes": [],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": null,
+      "order_id": "ORD-1001",
+      "amount_cents": null,
+      "explanation": "",
+      "policy_latency_ms": 18.53
+    },
+    {
+      "action_id": "b94aadafe90b4e9fb1cd1da9d163a8bd",
+      "tool": "refund",
+      "status": "needs_reconciliation",
+      "reason_codes": [
+        "schema.human_approval_required"
+      ],
+      "receipt": null,
+      "ledger_effect": {
+        "changed": false
+      },
+      "policy_hash": "aff7f6da93336002",
+      "reviewer": "finance-reviewer",
+      "order_id": "ORD-1001",
+      "amount_cents": 4000,
+      "explanation": "refunds need finance approval",
+      "policy_latency_ms": 0.553
+    }
+  ],
+  "error": null,
+  "created_at": 1795168142.3875132,
+  "updated_at": 1795168142.4821446
+}

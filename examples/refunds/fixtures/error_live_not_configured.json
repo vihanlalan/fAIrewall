@@ -1,0 +1,6 @@
+{
+  "status_code": 503,
+  "body": {
+    "detail": "Live Gemini runs are not configured: set GEMINI_API_KEY and restart."
+  }
+}

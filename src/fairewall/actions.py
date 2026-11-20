@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -67,6 +68,12 @@ class ActionStore:
             self._validators[name] = Draft202012Validator(schema, registry=Registry())
         self.actions = MappingProxyType(self.actions)
         self.audit, self.detectors = audit, detectors
+        # Per-thread timing of the last handler call, so callers can separate
+        # fAIrewall's own overhead from the time the business system took.
+        self._timing = threading.local()
+        self._local = threading.local()
+        self._connections = []
+        self._connections_lock = threading.Lock()
         with self.transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS actions (
                 id TEXT PRIMARY KEY, principal TEXT, session TEXT, token TEXT,
@@ -89,6 +96,8 @@ class ActionStore:
                     INSERT INTO action_events VALUES (NEW.id, NEW.status, NEW.reviewer,
                         NEW.policy_hash, strftime('%Y-%m-%dT%H:%M:%fZ','now')); END""")
 
+            db.execute("""CREATE TABLE IF NOT EXISTS definition_reviews
+                (tool TEXT, server TEXT, fingerprint TEXT, reviewer TEXT, at TEXT)""")
             db.execute("""CREATE TABLE IF NOT EXISTS registry
                 (tool TEXT PRIMARY KEY, fingerprint TEXT, generation INTEGER NOT NULL)""")
             previous = {r["tool"]: r["fingerprint"] for r in db.execute("SELECT * FROM registry")}
@@ -103,14 +112,40 @@ class ActionStore:
 
     @contextmanager
     def transaction(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
+        """One write-locked transaction on this thread's connection.
+
+        Connections are reused per thread: opening one costs more than the
+        policy decision itself. WAL journaling lets readers proceed while a
+        writer commits; every commit is still fully synchronous.
+        """
+        db = getattr(self._local, "db", None)
+        if db is None:
+            db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+            self._local.db = db
+            with self._connections_lock:
+                self._connections.append(db)
+        db.execute("BEGIN IMMEDIATE")
         try:
-            with db:
-                db.execute("BEGIN IMMEDIATE")
-                yield db
-        finally:
-            db.close()
+            yield db
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        else:
+            db.execute("COMMIT")
+
+    def close(self):
+        """Close every connection this store opened (needed before deleting its files)."""
+        with self._connections_lock:
+            for db in self._connections:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            self._connections.clear()
+        self._local = threading.local()
 
     def _runtime(self, db, session, principal):
         scope = canonical([principal.id, session])
@@ -172,6 +207,55 @@ class ActionStore:
             rows = db.execute("SELECT * FROM actions WHERE status='pending' AND expires>? ORDER BY rowid",
                               (time.time(),))
             return [self._view(row) for row in rows]
+
+    def find(self, principal_id, token):
+        """The action bound to (principal, idempotency key), or None.
+
+        Lets a caller recover the action after a handler raised mid-dispatch,
+        when ``submit`` or ``review`` could not return the record.
+        """
+        with self.transaction() as db:
+            row = db.execute("SELECT id FROM actions WHERE json_extract(principal,'$.id')=? AND token=?",
+                             (principal_id, token)).fetchone()
+        return self.get(row["id"]) if row else None
+
+    @property
+    def last_handler_ms(self):
+        """Milliseconds the last handler call on this thread took (0 if none ran)."""
+        return getattr(self._timing, "handler_ms", 0.0)
+
+    def pending_definitions(self):
+        """Registered tool definitions not yet reviewed in their current form."""
+        with self.transaction() as db:
+            pins = {(r["server"], r["tool"]): r["fingerprint"] for r in db.execute("SELECT * FROM pins")}
+        out = []
+        for name, action in self.actions.items():
+            if pins.get((action.server, name)) != action.fingerprint():
+                out.append({"tool": name, "server": action.server, "revision": action.revision,
+                            "fingerprint": action.fingerprint(), "definition": action.definition})
+        return out
+
+    def review_definition(self, tool, reviewer):
+        """Approve a tool definition on its own, before any call uses it.
+
+        Separate from approving a call: reviewing what a tool *is* must never
+        be mistaken for approving what one call *does*. A definition that
+        changes later is unpinned again by the registry and needs a new review.
+        """
+        if not reviewer or not reviewer.strip():
+            raise ApprovalError("A reviewer is required")
+        action = self.actions.get(tool)
+        if action is None:
+            raise ApprovalError("Unknown tool")
+        with self.transaction() as db:
+            current = db.execute("SELECT * FROM registry WHERE tool=?", (tool,)).fetchone()
+            if not current or current["fingerprint"] != action.fingerprint():
+                raise ApprovalError("Worker has an outdated tool definition")
+            db.execute("INSERT OR REPLACE INTO pins VALUES (?,?,?)",
+                       (action.server, tool, action.fingerprint()))
+            db.execute("INSERT INTO definition_reviews VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                       (tool, action.server, action.fingerprint(), reviewer.strip()))
+        return {"tool": tool, "fingerprint": action.fingerprint(), "reviewer": reviewer.strip()}
 
     def submit(self, tool, arguments, session, principal, token):
         if not session or not token or not principal.id or tool not in self.actions:
@@ -267,8 +351,13 @@ class ActionStore:
 
     def _dispatch(self, request_id, action):
         row = self.get(request_id)
+        started = time.perf_counter()
+        self._timing.handler_ms = 0.0
         try:
-            result = action.handler(row["arguments"], request_id)
+            try:
+                result = action.handler(row["arguments"], request_id)
+            finally:
+                self._timing.handler_ms = (time.perf_counter() - started) * 1000
             with self.transaction() as db:
                 self._finish(db, row, result)
         except Exception:
