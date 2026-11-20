@@ -78,3 +78,21 @@ def test_cron_anchor_needs_the_secret(tmp_path, monkeypatch):
     assert client.get("/api/cron/anchor", headers={"Authorization": "Bearer nope"}).status_code == 401
     ok = client.get("/api/cron/anchor", headers={"Authorization": "Bearer s3cret"})
     assert ok.status_code == 200 and ok.json()["ok"] is True
+
+
+def test_serverless_uses_a_thread_free_pool_rebuilt_after_fork(monkeypatch):
+    from fairewall import db
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("FAIREWALL_DB_POOL_MODE", raising=False)
+    assert db._inline_pool_wanted()
+    url = "postgresql://u:p@127.0.0.1:1/never"
+    try:
+        first = db._pool(url)
+        assert isinstance(first, db.InlinePool)
+        assert db._pool(url) is first
+        first.pid = -1  # as if the runtime forked or restored the process after startup
+        assert db._pool(url) is not first
+    finally:
+        db._POOLS.pop(url, None)
+    monkeypatch.delenv("VERCEL")
+    assert not db._inline_pool_wanted()

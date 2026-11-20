@@ -138,6 +138,94 @@ def _behind_pooler(url: str) -> bool:
     return "-pooler." in host or "pgbouncer" in host
 
 
+class InlinePool:
+    """A connection pool with no background threads, for serverless hosts (Vercel).
+
+    psycopg_pool opens connections from worker threads. A serverless runtime may start the app,
+    then fork or snapshot the process to serve requests; the workers do not come along, so every
+    request would wait for a connection that never arrives (PoolTimeout). Here the requesting
+    thread opens connections itself, checks an idle one before reuse, and the pool is rebuilt
+    whenever the process id changes.
+    """
+
+    def __init__(self, url: str, size: int, kwargs: Dict[str, Any]) -> None:
+        self.url, self.size, self.kwargs = url, max(1, size), kwargs
+        self.pid = os.getpid()
+        self._idle: list = []
+        self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(self.size)
+        self.timeout = float(os.environ.get("FAIREWALL_DB_POOL_TIMEOUT_S", "30"))
+
+    def _connect(self) -> Any:
+        import psycopg  # type: ignore
+        return psycopg.connect(self.url, connect_timeout=10, **self.kwargs)
+
+    def _usable(self, conn: Any) -> bool:
+        if conn.closed or conn.broken:
+            return False
+        try:
+            conn.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    @contextmanager
+    def connection(self) -> Iterator[Any]:
+        if not self._slots.acquire(timeout=self.timeout):
+            raise RuntimeError("No database connection free after %.0fs (FAIREWALL_DB_POOL_SIZE=%d)"
+                               % (self.timeout, self.size))
+        conn = None
+        try:
+            while conn is None:
+                with self._lock:
+                    candidate = self._idle.pop() if self._idle else None
+                if candidate is None:
+                    conn = self._connect()
+                elif self._usable(candidate):
+                    conn = candidate
+                else:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+            yield conn
+        except BaseException:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+            raise
+        finally:
+            if conn is not None:
+                if conn.closed or conn.broken or conn.info.transaction_status != 0:  # 0: idle
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                else:
+                    with self._lock:
+                        self._idle.append(conn)
+            self._slots.release()
+
+    def close(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for conn in idle:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _inline_pool_wanted() -> bool:
+    mode = os.environ.get("FAIREWALL_DB_POOL_MODE", "").strip().lower()
+    if mode in ("inline", "threads"):
+        return mode == "inline"
+    return bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
+
 def _pool(url: str) -> Any:
     """One small connection pool per database URL, shared by every store on it.
 
@@ -146,6 +234,14 @@ def _pool(url: str) -> Any:
     """
     with _POOLS_LOCK:
         pool = _POOLS.get(url)
+        if isinstance(pool, InlinePool) and pool.pid != os.getpid():
+            pool = None  # forked or restored into a new process: old sockets are not ours
+        if pool is None and _inline_pool_wanted():
+            kwargs = {"autocommit": True, "row_factory": _pg_row_factory}
+            if _behind_pooler(url):
+                kwargs["prepare_threshold"] = None
+            pool = InlinePool(url, int(os.environ.get("FAIREWALL_DB_POOL_SIZE", "5")), kwargs)
+            _POOLS[url] = pool
         if pool is None:
             try:
                 from psycopg_pool import ConnectionPool  # type: ignore
