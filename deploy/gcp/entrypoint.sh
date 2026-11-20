@@ -14,11 +14,7 @@ case "${FAIREWALL_ROLE:-sdk-gateway}" in
     exec fairewall control-plane --host 0.0.0.0 --port "$PORT" \
          --db "${FAIREWALL_DATABASE_URL:?FAIREWALL_DATABASE_URL is required}" ;;
   anchor)
-    # One pass: seal new audit records and publish to the bucket and, if a key is set, Base.
-    ARGS=""
-    [ -n "$FAIREWALL_ANCHOR_BUCKET" ] && ARGS="$ARGS --bucket $FAIREWALL_ANCHOR_BUCKET"
-    [ -n "$FAIREWALL_ANCHOR_KEY" ] && ARGS="$ARGS --evm"
-    exec fairewall anchor run $ARGS ;;
+    exec python -m fairewall.lab --anchor ;;
   sdk-gateway|*)
     exec python -m uvicorn fairewall.server:app --host 0.0.0.0 --port "$PORT" \
          --proxy-headers --forwarded-allow-ips "*" ;;

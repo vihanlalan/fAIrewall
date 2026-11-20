@@ -41,7 +41,8 @@ It is idempotent: re-running it updates in place. It prints the public Lab URL a
 
 Options (environment variables): `REGION` (default `asia-south1`), `ARMOR_LOCATION` (default the same;
 `asia-south1` has limited Model Armor support and skips non-English injection checks, so use
-`us-central1` if that matters), `GEMINI_MODEL`, `SQL_TIER`, `RETENTION`, `LOCK_BUCKET=yes` (asks you to
+`us-central1` if that matters), `GEMINI_MODEL` (default `gemini-3.5-flash-lite`), `VERTEX_LOCATION`
+(default `global` for standard pay-as-you-go), `SQL_TIER`, `RETENTION`, `LOCK_BUCKET=yes` (asks you to
 type the bucket name, then locks retention **permanently**), `ANCHOR_KEY_SECRET` (a Secret Manager secret
 holding a Base Sepolia private key; get test ETH from a Base Sepolia faucet), `BILLING_ACCOUNT` + `BUDGET_INR`.
 
@@ -51,10 +52,27 @@ holding a Base Sepolia private key; get test ETH from a Base Sepolia faucet), `B
 LAB_URL=https://fw-lab-xxxx.a.run.app ./deploy/gcp/smoke.sh
 ```
 
-It proves, against the live deployment: the deterministic block skips Model Armor; routed content reaches
-live Model Armor (raw filter results printed); a labelled case makes a variant blocked by memory; a live
-Gemini proposal (source `live`, the model Vertex reports); both remote gateways observe a freeze, with the
-measured propagation; and the evidence proof checks.
+The smoke check exits nonzero unless it verifies a deterministic block with Model Armor skipped, a fresh
+Model Armor filter result, a learned block, a live Vertex Gemini tool proposal, two distinct remote Cloud Run
+gateway acknowledgments, and a valid Merkle proof with a confirmed Cloud Storage receipt. It checks the
+gateway service identities returned by the services. Set `SMOKE_REQUIRE_EVM=true` to also require the
+optional on-chain confirmation. `SMOKE_ANCHOR_TIMEOUT_S` controls how long it polls for publication.
+
+The deploy script runs `fw-anchor` once before printing the Lab URL. After that, Cloud Scheduler triggers it
+every ten minutes. The job reads `lab_audit`, the same PostgreSQL schema the Lab uses. Its bucket objects live
+under `fairewall-lab-anchors/`. A scheduled publish failure leaves the affected batch pending in the Lab.
+To publish a freshly generated run for a rehearsal without waiting for the schedule, run:
+
+```bash
+gcloud run jobs execute fw-anchor --project "$PROJECT_ID" --region "${REGION:-asia-south1}" --wait
+```
+
+Open **Console → Evidence** after the job finishes and check that the run's records are anchored. The smoke
+check verifies the pre-seeded sample proof. Use this extra step to verify publishing a new judge-run batch.
+For **Console → Approvals & learning**, run chapter 4 in Demo, then approve from Console. Return to Demo and
+confirm that the held action produced exactly one delivery.
+
+See [the product explanation and diagrams](../../docs/fairewall-lab.md) for the SDK workflow and demo boundaries.
 
 ## Live vs recorded
 

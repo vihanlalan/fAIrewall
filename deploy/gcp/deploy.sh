@@ -4,9 +4,10 @@
 #   PROJECT_ID=my-project ./deploy/gcp/deploy.sh
 #
 # Settings (environment variables, all optional except PROJECT_ID):
-#   REGION=asia-south1              Cloud Run, Cloud SQL, Artifact Registry, Gemini (Vertex AI)
+#   REGION=asia-south1              Cloud Run, Cloud SQL, Artifact Registry
 #   ARMOR_LOCATION=asia-south1      Model Armor template location (us-central1 for full non-English support)
-#   GEMINI_MODEL=gemini-2.5-flash   Vertex AI model
+#   VERTEX_LOCATION=global         Vertex AI location for standard pay-as-you-go
+#   GEMINI_MODEL=gemini-3.5-flash-lite
 #   SQL_TIER=db-g1-small            Cloud SQL machine tier
 #   BUCKET=<project>-fairewall-evidence   evidence bucket
 #   RETENTION=30d                   bucket retention period
@@ -19,7 +20,8 @@ set -euo pipefail
 : "${PROJECT_ID:?Set PROJECT_ID}"
 REGION="${REGION:-asia-south1}"
 ARMOR_LOCATION="${ARMOR_LOCATION:-$REGION}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.5-flash-lite}"
 SQL_TIER="${SQL_TIER:-db-g1-small}"
 SQL_INSTANCE="${SQL_INSTANCE:-fairewall-sql}"
 REPO="${REPO:-fairewall}"
@@ -73,7 +75,7 @@ grant fw-anchor roles/logging.logWriter
 say "Cloud SQL for PostgreSQL ($SQL_TIER)"
 if ! gcloud sql instances describe "$SQL_INSTANCE" >/dev/null 2>&1; then
   gcloud sql instances create "$SQL_INSTANCE" --database-version POSTGRES_16 --tier "$SQL_TIER" \
-    --region "$REGION" --storage-auto-increase --backup-start-time 20:00
+    --region "$REGION" --edition ENTERPRISE --storage-auto-increase --backup-start-time 20:00
 fi
 gcloud sql databases describe fairewall --instance "$SQL_INSTANCE" >/dev/null 2>&1 || \
   gcloud sql databases create fairewall --instance "$SQL_INSTANCE"
@@ -92,17 +94,22 @@ say "Secrets"
 mk_secret() { gcloud secrets describe "$1" >/dev/null 2>&1 || openssl rand -hex 24 | gcloud secrets create "$1" --data-file=-; }
 mk_secret fw-gateway-key
 mk_secret fw-reviewer-key
+mk_secret fw-control-key
 for s in fw-db-url fw-gateway-key fw-reviewer-key; do
   for sa in fw-lab fw-gateway fw-control fw-anchor; do
     gcloud secrets add-iam-policy-binding "$s" --member "serviceAccount:$(SA $sa)" \
       --role roles/secretmanager.secretAccessor >/dev/null
   done
 done
-ANCHOR_ENV=""
+gcloud secrets add-iam-policy-binding fw-control-key --member "serviceAccount:$(SA fw-control)" \
+  --role roles/secretmanager.secretAccessor >/dev/null
+ANCHOR_SECRETS="FAIREWALL_DATABASE_URL=fw-db-url:latest"
+VERIFY_EVM=false
 if [ -n "${ANCHOR_KEY_SECRET:-}" ]; then
   gcloud secrets add-iam-policy-binding "$ANCHOR_KEY_SECRET" --member "serviceAccount:$(SA fw-anchor)" \
     --role roles/secretmanager.secretAccessor >/dev/null
-  ANCHOR_ENV="--set-secrets=FAIREWALL_ANCHOR_KEY=${ANCHOR_KEY_SECRET}:latest"
+  ANCHOR_SECRETS+=",FAIREWALL_ANCHOR_KEY=${ANCHOR_KEY_SECRET}:latest"
+  VERIFY_EVM=true
 fi
 
 # ------------------------------------------------------------ evidence bucket
@@ -140,26 +147,29 @@ say "Build $IMAGE with Cloud Build"
 gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
   --substitutions "_REGION=$REGION,_REPO=$REPO,_TAG=$TAG" .
 
-COMMON=(--image "$IMAGE" --region "$REGION" --add-cloudsql-instances "$CONN"
-        --set-secrets "FAIREWALL_DATABASE_URL=fw-db-url:latest,FAIREWALL_API_KEY=fw-gateway-key:latest,FAIREWALL_REVIEWER_KEY=fw-reviewer-key:latest"
-        --set-env-vars "FAIREWALL_DB_POOL_SIZE=10,GOOGLE_CLOUD_PROJECT=$PROJECT_ID")
+COMMON=(--image "$IMAGE" --region "$REGION" --set-cloudsql-instances "$CONN")
+COMMON_ENV="FAIREWALL_DB_POOL_SIZE=10,GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
+GATEWAY_SECRETS="FAIREWALL_DATABASE_URL=fw-db-url:latest,FAIREWALL_API_KEY=fw-gateway-key:latest,FAIREWALL_REVIEWER_KEY=fw-reviewer-key:latest"
 
 # ------------------------------------------------------------------- migrate
 say "Migrations (one job, before any service starts)"
 gcloud run jobs deploy fw-migrate "${COMMON[@]}" --service-account "$(SA fw-lab)" \
-  --update-env-vars FAIREWALL_ROLE=migrate --max-retries 1 --task-timeout 600
+  --set-secrets "FAIREWALL_DATABASE_URL=fw-db-url:latest" \
+  --set-env-vars "$COMMON_ENV,FAIREWALL_ROLE=migrate" --max-retries 1 --task-timeout 600
 gcloud run jobs execute fw-migrate --region "$REGION" --wait
 
 # ------------------------------------------------------------------ services
 say "Private gateways (two identities for the fleet chapters)"
 for gw in gateway-a gateway-b; do
   gcloud run deploy "fw-$gw" "${COMMON[@]}" --service-account "$(SA fw-gateway)" \
-    --update-env-vars "FAIREWALL_ROLE=gateway,FAIREWALL_AUDIT_LOG_ID=$gw" \
+    --set-secrets "$GATEWAY_SECRETS" \
+    --set-env-vars "$COMMON_ENV,FAIREWALL_ROLE=gateway,FAIREWALL_AUDIT_LOG_ID=$gw" \
     --no-allow-unauthenticated --min-instances 1 --max-instances 3 --concurrency 40 --cpu 1 --memory 512Mi
 done
 say "Private control plane"
 gcloud run deploy fw-control "${COMMON[@]}" --service-account "$(SA fw-control)" \
-  --update-env-vars FAIREWALL_ROLE=control --no-allow-unauthenticated --max-instances 2
+  --set-secrets "FAIREWALL_DATABASE_URL=fw-db-url:latest,FAIREWALL_ADMIN_KEY=fw-control-key:latest" \
+  --set-env-vars "$COMMON_ENV,FAIREWALL_ROLE=control" --no-allow-unauthenticated --max-instances 2
 
 GW_A=$(gcloud run services describe fw-gateway-a --region "$REGION" --format 'value(status.url)')
 GW_B=$(gcloud run services describe fw-gateway-b --region "$REGION" --format 'value(status.url)')
@@ -170,13 +180,15 @@ done
 
 say "Public Lab"
 gcloud run deploy fw-lab "${COMMON[@]}" --service-account "$(SA fw-lab)" \
-  --update-env-vars "FAIREWALL_ROLE=lab,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_LOCATION=$REGION,GEMINI_MODEL=$GEMINI_MODEL,MODEL_ARMOR_TEMPLATE=$ARMOR_TEMPLATE,LAB_GATEWAY_A_URL=$GW_A,LAB_GATEWAY_B_URL=$GW_B,FAIREWALL_ANCHOR_BUCKET=$BUCKET,LAB_ENVIRONMENT=cloud:$REGION" \
+  --set-secrets "FAIREWALL_DATABASE_URL=fw-db-url:latest,FAIREWALL_API_KEY=fw-gateway-key:latest" \
+  --set-env-vars "$COMMON_ENV,FAIREWALL_ROLE=lab,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_LOCATION=$VERTEX_LOCATION,GEMINI_MODEL=$GEMINI_MODEL,MODEL_ARMOR_TEMPLATE=$ARMOR_TEMPLATE,LAB_GATEWAY_A_URL=$GW_A,LAB_GATEWAY_B_URL=$GW_B,FAIREWALL_ANCHOR_BUCKET=$BUCKET,FAIREWALL_ANCHOR_VERIFY_EVM=$VERIFY_EVM,LAB_ENVIRONMENT=cloud:$REGION" \
   --allow-unauthenticated --min-instances 0 --max-instances 4 --concurrency 8 --cpu 1 --memory 1Gi --timeout 120
 
 # ---------------------------------------------------------------- anchoring
 say "Anchor job every 10 minutes (Cloud Run job + Cloud Scheduler)"
 gcloud run jobs deploy fw-anchor "${COMMON[@]}" --service-account "$(SA fw-anchor)" \
-  --update-env-vars "FAIREWALL_ROLE=anchor,FAIREWALL_ANCHOR_BUCKET=$BUCKET" ${ANCHOR_ENV} \
+  --set-secrets "$ANCHOR_SECRETS" \
+  --set-env-vars "$COMMON_ENV,FAIREWALL_ROLE=anchor,FAIREWALL_ANCHOR_BUCKET=$BUCKET" \
   --parallelism 1 --tasks 1 --max-retries 2 --task-timeout 300
 gcloud run jobs add-iam-policy-binding fw-anchor --region "$REGION" \
   --member "serviceAccount:$(SA fw-scheduler)" --role roles/run.invoker >/dev/null
@@ -184,6 +196,7 @@ JOB_URI="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/jo
 gcloud scheduler jobs describe fw-anchor-every-10m --location "$REGION" >/dev/null 2>&1 || \
   gcloud scheduler jobs create http fw-anchor-every-10m --location "$REGION" --schedule "*/10 * * * *" \
     --uri "$JOB_URI" --http-method POST --oauth-service-account-email "$(SA fw-scheduler)"
+gcloud run jobs execute fw-anchor --region "$REGION" --wait
 
 # ---------------------------------------------------------------- monitoring
 say "Log-based metrics"

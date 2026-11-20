@@ -122,6 +122,22 @@ _POOLS: Dict[str, Any] = {}
 _POOLS_LOCK = threading.Lock()
 
 
+def _behind_pooler(url: str) -> bool:
+    """True when connections go through a transaction pooler (PgBouncer, Neon's ``-pooler`` host).
+
+    Such poolers hand each transaction to any server connection, so server-side prepared
+    statements are switched off. Advisory locks here are transaction-scoped, so they still hold.
+    Override with FAIREWALL_DB_POOLER=1/0.
+    """
+    flag = os.environ.get("FAIREWALL_DB_POOLER", "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        return True
+    if flag in ("0", "false", "no"):
+        return False
+    host = urlsplit(url).hostname or ""
+    return "-pooler." in host or "pgbouncer" in host
+
+
 def _pool(url: str) -> Any:
     """One small connection pool per database URL, shared by every store on it.
 
@@ -136,9 +152,12 @@ def _pool(url: str) -> Any:
             except ImportError as exc:  # pragma: no cover - env dependent
                 raise ImportError("Postgres storage needs `pip install 'fairewall[postgres]'`") from exc
             size = int(os.environ.get("FAIREWALL_DB_POOL_SIZE", "5"))
+            kwargs: Dict[str, Any] = {"autocommit": True, "row_factory": _pg_row_factory}
+            if _behind_pooler(url):
+                kwargs["prepare_threshold"] = None
             pool = ConnectionPool(
                 url, min_size=1, max_size=max(1, size), open=True, name="fairewall",
-                kwargs={"autocommit": True, "row_factory": _pg_row_factory},
+                kwargs=kwargs,
                 check=ConnectionPool.check_connection,
                 timeout=float(os.environ.get("FAIREWALL_DB_POOL_TIMEOUT_S", "30")))
             _POOLS[url] = pool

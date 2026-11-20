@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+import json
 import os
 import threading
 import time
@@ -200,6 +202,21 @@ def create_lab_app(lab: Lab) -> FastAPI:
     @app.get("/api/limits")
     def limits() -> Dict[str, Any]:
         return lab.limits_view()
+
+    @app.api_route("/api/cron/anchor", methods=["GET", "POST"], include_in_schema=False)
+    def cron_anchor(authorization: Optional[str] = Header(None)) -> JSONResponse:
+        """Seal and publish the Lab's audit records. Vercel Cron calls it with ``Bearer $CRON_SECRET``."""
+        secret = os.environ.get("CRON_SECRET", "")
+        if not secret:
+            raise HTTPException(404, "Not found")
+        supplied = (authorization or "").split(" ", 1)[-1].strip()
+        if not hmac.compare_digest(supplied.encode(), secret.encode()):
+            raise HTTPException(401, "Bad cron secret")
+        from .runtime import anchor_once_from_env
+        out = anchor_once_from_env()
+        print(json.dumps({"component": "fairewall-lab", "event": "anchor", "ok": out["ok"],
+                          "sealed": out["sealed"], "published": out["published"]}))
+        return JSONResponse(status_code=200 if out["ok"] else 502, content=out)
 
     @app.exception_handler(Exception)
     async def unexpected(request: Request, exc: Exception) -> JSONResponse:

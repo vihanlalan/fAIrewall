@@ -1,0 +1,48 @@
+digraph Architecture {
+  graph [rankdir=TB, bgcolor="#F3F7FB", pad="0.36", nodesep="0.42", ranksep="0.68",
+         labelloc=t, labeljust=l, fontname="DejaVu Sans", fontsize=25,
+         label=<<B>fAIrewall Lab</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="13" COLOR="#53647C">SDK enforcement and Google Cloud architecture</FONT>>];
+  node [shape=box, style="rounded,filled", color="#CCD8E7", fillcolor="#FFFFFF",
+        fontcolor="#142A45", fontname="DejaVu Sans", fontsize=11, margin="0.27,0.18"];
+  edge [color="#617690", fontcolor="#3F526D", fontname="DejaVu Sans", fontsize=9, arrowsize=0.68];
+
+  browser [label=<<B>Judge’s browser</B><BR/>Demo and Console>, fillcolor="#E2F0FC", color="#9CBDE3"];
+  lab [label=<<B>Public Lab service</B><BR/>Cloud Run · per-judge workspace<BR/>Agent runner, reviewer API and trace>, fillcolor="#DCEDEA", color="#80B5AA"];
+  sdk [label=<<B>fAIrewall SDK</B><BR/>Input screening and action enforcement<BR/>Rules, routing, detectors and review<BR/>Registered tool dispatch>, fillcolor="#17405B", color="#17405B", fontcolor="#FFFFFF"];
+  vertex [label=<<B>Vertex AI Gemini</B><BR/>Proposes tool calls>, fillcolor="#E2F0FC"];
+  armor [label=<<B>Model Armor</B><BR/>Selected deep screening>, fillcolor="#E2F0FC"];
+  gateways [label=<<B>Private gateways A and B</B><BR/>Cloud Run · freeze probes>, fillcolor="#E2F0FC"];
+  control [label=<<B>Policy control store</B><BR/>Replay and Lab rollout simulation>];
+  shop [label=<<B>Sandbox tools</B><BR/>Orders, refund ledger and outbox>, fillcolor="#DCEDEA", color="#80B5AA"];
+  sql [label=<<B>Cloud SQL PostgreSQL</B><BR/>Runs, actions, labels, freezes and ledger<BR/>Lab audit schema: lab_audit>, fillcolor="#FAEEDC", color="#D7B781"];
+  scheduler [label=<<B>Cloud Scheduler</B><BR/>Every ten minutes>, fillcolor="#E2F0FC"];
+  anchor [label=<<B>Lab anchor job</B><BR/>Cloud Run · Merkle batch publication>, fillcolor="#DCEDEA", color="#80B5AA"];
+  bucket [label=<<B>Cloud Storage</B><BR/>Published evidence and receipts>, fillcolor="#FAEEDC", color="#D7B781"];
+  base [label=<<B>Base Sepolia</B><BR/>Optional commitment>, style="rounded,filled,dashed"];
+
+  { rank=same; vertex; lab; gateways; }
+  { rank=same; armor; sdk; control; }
+  { rank=same; shop; sql; scheduler; }
+  { rank=same; bucket; anchor; base; }
+
+  browser -> lab [label=" HTTPS"];
+  lab -> vertex [label=" live proposals" dir=both, constraint=false];
+  lab -> sdk [label=" inputs and actions", penwidth=1.6, color="#347E75"];
+  lab -> gateways [label=" service ID probes", constraint=false];
+  sdk -> armor [label=" routed input", dir=both, constraint=false];
+  lab -> control [label=" compare policies"];
+  sdk -> shop [label=" allowed dispatch"];
+  sdk -> sql [label=" state and audit"];
+  shop -> sql [label=" receipts", constraint=false];
+  control -> sql [label=" policy versions"];
+  gateways -> sql [label=" shared freezes"];
+  sql -> anchor [label=" Lab audit records"];
+  scheduler -> anchor [label=" trigger"];
+  anchor -> bucket [label=" publish", constraint=false];
+  anchor -> base [label=" optional", style=dashed, constraint=false];
+
+  vertex -> lab -> gateways [style=invis, weight=5];
+  armor -> sdk -> control [style=invis, weight=5];
+  shop -> sql -> scheduler [style=invis, weight=5];
+  bucket -> anchor -> base [style=invis, weight=5];
+}

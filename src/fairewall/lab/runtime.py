@@ -57,6 +57,12 @@ MAX_INPUT = 2000
 UNTRUSTED_KINDS = {"email", "website", "transcript", "free"}
 
 
+def lab_audit_target(data: Any) -> str:
+    if is_postgres(data):
+        return with_schema(data, "lab_audit")
+    return str(Path(data) / "audit.sqlite")
+
+
 class LabError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -121,22 +127,26 @@ class GatewayIdentity:
 
     def check(self, principal: Principal, session: str) -> Dict[str, Any]:
         started = time.time()
+        service = None
         if self.url:
             import urllib.request
             body = json.dumps({"tool": "lookup_order", "arguments": {"order_id": "ORD-1001"},
                                "session_id": session, "principal_id": principal.id,
                                "principal_roles": principal.roles}).encode()
             headers = {"Content-Type": "application/json", "X-API-Key": self.api_key}
-            token = _id_token(self.url)
+            # Cloud Run gateways sit behind IAM; elsewhere (Vercel) the API key alone authenticates.
+            token = _id_token(self.url) if os.environ.get("K_SERVICE") else None
             if token:
                 headers["Authorization"] = "Bearer " + token
             req = urllib.request.Request(self.url + "/v1/inspect/tool", data=body, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=10) as resp:
+                service = resp.headers.get("X-Fairewall-Gateway")
                 d = json.loads(resp.read().decode())["decision"]
         else:
             ctx = self.firewall.session(session, principal)
             d = self.firewall.inspect("lookup_order", {"order_id": "ORD-1001"}, ctx=ctx).to_dict()
-        return {"gateway": self.name, "mode": self.mode, "route": d.get("route"), "verdict": d.get("verdict"),
+        return {"gateway": self.name, "service": service, "mode": self.mode,
+                "route": d.get("route"), "verdict": d.get("verdict"),
                 "rule_ids": sorted({f["rule_id"] for f in d.get("findings", [])}), "at": time.time(),
                 "ms": round((time.time() - started) * 1000, 1)}
 
@@ -217,6 +227,8 @@ class Lab:
     # ----------------------------------------------------------- locations
 
     def loc(self, name: str) -> str:
+        if name == "audit":
+            return lab_audit_target(self.data)
         if is_postgres(self.data):
             if name == "gateway":
                 # The gateways' own schema: freezes set here are the ones every gateway reads.
@@ -531,6 +543,7 @@ class Lab:
             return self.run_view(ws, run_id)
         self.record(ws, run_id=run_id, event="proposal", outcome=agent_run["status"],
                     evidence={"source": agent_run["source"], "model": agent_run["model"],
+                              "backend": getattr(self.live, "backend", None) if live_ok else None,
                               "model_ms": agent_run["model_latency_ms"], "turns": agent_run["turns"],
                               "proposed": [{"tool": a["tool"], "action_id": a["action_id"]}
                                            for a in agent_run["actions"]]},
@@ -869,7 +882,11 @@ class Lab:
                 log.append("synthetic_decision", {"synthetic": True, "tool": tool, "verdict": verdict,
                                                   "note": "Pre-anchored example #%d for the Evidence chapter" % i})
             try:
-                self.anchorer.run_once()
+                if is_postgres(self.data):
+                    # Only the anchor job holds cloud publication credentials.
+                    self.anchorer.seal()
+                else:
+                    self.anchorer.run_once()
             except Exception:
                 pass
 
@@ -897,15 +914,20 @@ class Lab:
                                   ("pending" if res.get("pending") else "not confirmed"),
                                   "detail": res.get("detail"),
                                   "link": receipt.get("explorer") if res.get("ok") else None})
-        progress = {}
-        with self.anchorer.db.transaction() as db:
-            for r in db.execute("SELECT * FROM anchor_progress"):
-                progress[r["log_id"]] = r["last_seq"]
         agent = self.agent(ws).id
-        mine = [r for r in self.audit.records_after(-1, limit=5000)
-                if agent in json.dumps(r.get("principal", "")) or agent in json.dumps(r.get("session_id", ""))][-12:]
-        fresh = [{"seq": r["seq"], "event": r["event"], "hash": r["hash"], "log_id": self.audit.log_id,
-                  "anchored": r["seq"] <= progress.get(self.audit.log_id, -1)} for r in mine]
+        with self.anchorer.db.transaction() as db:
+            mine = list(db.execute("SELECT seq, event, hash, log_id FROM audit_records WHERE %s=? "
+                                   "ORDER BY at DESC, log_id DESC, seq DESC LIMIT 12"
+                                   % self.anchorer.db.json_text("body", "principal"), (agent,)))
+        fresh = []
+        for row in reversed(mine):
+            entry = dict(row)
+            matching = next((a for a in reversed(anchors)
+                             if row["log_id"] in a["ranges"]
+                             and a["ranges"][row["log_id"]][0] <= row["seq"] <= a["ranges"][row["log_id"]][1]),
+                            None)
+            entry["anchored"] = bool(matching and matching["status"] == "anchored")
+            fresh.append(entry)
         return self.mask(ws, {"synthetic_proof": proof, "proof_check": check_proof(proof) if proof else None,
                               "published": published, "error": err,
                               "batches": [{k: a[k] for k in ("batch", "commitment", "size", "status", "created")}
@@ -961,9 +983,71 @@ class Lab:
                                                                "fingerprint": self.base_policy.fingerprint()}}
 
 
+def _data_from_env() -> str:
+    # DATABASE_URL / POSTGRES_URL: what Neon (Vercel Marketplace) sets.
+    for var in ("FAIREWALL_DATABASE_URL", "DATABASE_URL", "POSTGRES_URL"):
+        if os.environ.get(var):
+            return os.environ[var]
+    return os.environ.get("LAB_DATA_DIR", "lab-data")
+
+
+def _environment_from_env() -> str:
+    if os.environ.get("LAB_ENVIRONMENT"):
+        return os.environ["LAB_ENVIRONMENT"]
+    if os.environ.get("K_SERVICE"):
+        return "cloud"
+    if os.environ.get("VERCEL"):
+        return "vercel"
+    return "local"
+
+
+def _anchor_backends_from_env(*, verify: bool = False) -> List[Any]:
+    backends = []
+    bucket = os.environ.get("FAIREWALL_ANCHOR_BUCKET")
+    if bucket:
+        # Keep objects distinct from standalone gateway anchor batches.
+        backends.append(BucketBackend(bucket, prefix="fairewall-lab-anchors/"))
+    if os.environ.get("FAIREWALL_ANCHOR_KEY") or (
+            verify and os.environ.get("FAIREWALL_ANCHOR_VERIFY_EVM") == "true"):
+        backends.append(EvmBackend())
+    return backends
+
+
+def anchor_once_from_env() -> Dict[str, Any]:
+    """One seal-and-publish pass over the Lab's audit store (Cloud Run job or Vercel Cron)."""
+    data = _data_from_env()
+    backends = _anchor_backends_from_env()
+    if not backends and not is_postgres(data):
+        backends = [FileBackend(str(Path(data) / "anchors"))]
+    if not backends:
+        return {"ok": False, "error": "No publication backend configured for the Lab "
+                                      "(set FAIREWALL_ANCHOR_BUCKET).", "sealed": None, "published": []}
+    out = Anchorer(lab_audit_target(data), backends).run_once()
+    published = [{"batch": b["batch"], "status": b["status"], "error": b.get("error")}
+                 for b in out["published"]]
+    return {"ok": all(b["status"] == "anchored" for b in published), "error": None,
+            "sealed": ({"batch": out["sealed"]["batch"], "size": out["sealed"]["size"]}
+                       if out["sealed"] else None),
+            "published": published, "backends": [b.name for b in backends]}
+
+
+def run_anchor_from_env() -> int:
+    """Run one publication pass against the same audit store as the Lab."""
+    out = anchor_once_from_env()
+    if out["error"]:
+        print("[anchor] %s" % out["error"])
+        return 1
+    if out["sealed"]:
+        print("[anchor] Sealed batch %s (%s records)" % (out["sealed"]["batch"], out["sealed"]["size"]))
+    for batch in out["published"]:
+        print("[anchor] Lab batch %s: %s%s" % (
+            batch["batch"], batch["status"], " — " + batch["error"] if batch["error"] else ""))
+    return int(not out["ok"])
+
+
 def from_env() -> Lab:
-    """Build the Lab from environment variables (Cloud Run)."""
-    data = os.environ.get("FAIREWALL_DATABASE_URL") or os.environ.get("LAB_DATA_DIR", "lab-data")
+    """Build the Lab from environment variables (Cloud Run, Vercel, or local)."""
+    data = _data_from_env()
     live = None
     if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") or os.environ.get("GEMINI_API_KEY"):
         try:
@@ -978,13 +1062,7 @@ def from_env() -> Lab:
     for name, var in (("gateway-a", "LAB_GATEWAY_A_URL"), ("gateway-b", "LAB_GATEWAY_B_URL")):
         if os.environ.get(var):
             gateways[name] = os.environ[var]
-    backends: Optional[List[Any]] = None
-    if os.environ.get("FAIREWALL_ANCHOR_BUCKET") or os.environ.get("FAIREWALL_ANCHOR_KEY"):
-        backends = []
-        if os.environ.get("FAIREWALL_ANCHOR_BUCKET"):
-            backends.append(BucketBackend(os.environ["FAIREWALL_ANCHOR_BUCKET"]))
-        if os.environ.get("FAIREWALL_ANCHOR_KEY"):
-            backends.append(EvmBackend())
     return Lab(data, live_client=live, model_armor=armor, gateway_urls=gateways,
-               gateway_key=os.environ.get("FAIREWALL_API_KEY", ""), anchor_backends=backends,
-               environment=os.environ.get("LAB_ENVIRONMENT", "cloud" if os.environ.get("K_SERVICE") else "local"))
+               gateway_key=os.environ.get("FAIREWALL_API_KEY", ""),
+               anchor_backends=_anchor_backends_from_env(verify=True) or None,
+               environment=_environment_from_env())

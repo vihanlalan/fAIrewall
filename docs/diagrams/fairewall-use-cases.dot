@@ -1,0 +1,38 @@
+digraph UseCases {
+  graph [rankdir=LR, bgcolor="#F3F7FB", pad="0.38", nodesep="0.35", ranksep="0.84",
+         labelloc=t, labeljust=l, fontname="DejaVu Sans", fontsize=25,
+         label=<<B>fAIrewall Lab use cases</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="13" COLOR="#53647C">The judge can exercise both workspace roles.</FONT>>];
+  node [shape=ellipse, style=filled, color="#AFC1D5", fillcolor="#FFFFFF", fontcolor="#142A45",
+        fontname="DejaVu Sans", fontsize=11, margin="0.24,0.10"];
+  edge [dir=none, color="#617690", fontname="DejaVu Sans", fontsize=9];
+
+  operator [shape=box, style="rounded,filled", label=<<B>Judge as operator</B><BR/>Demo tab>, fillcolor="#E2F0FC", color="#9CBDE3"];
+  reviewer [shape=box, style="rounded,filled", label=<<B>Judge as reviewer</B><BR/>Demo or Console>, fillcolor="#DCEDEA", color="#80B5AA"];
+  deployer [shape=box, style="rounded,filled", label=<<B>Deployment operator</B><BR/>Cloud tooling>, fillcolor="#FAEEDC", color="#D7B781"];
+
+  subgraph cluster_lab {
+    graph [style="rounded,filled", color="#CCD8E7", fillcolor="#EDF3FA",
+           label="fAIrewall Lab", fontname="DejaVu Sans", fontsize=15, fontcolor="#142A45", margin=21];
+    submit [label="Run a tour chapter or\nsubmit external content", fillcolor="#F8FCFF"];
+    inspect [label="Inspect the decision trace\nand sandbox outcome", fillcolor="#F8FCFF"];
+    approve [label="Approve or reject\na held action", fillcolor="#F5FBFA"];
+    learn [label="Label or revoke\na threat case", fillcolor="#F5FBFA"];
+    control [label="Freeze the sandbox or\ncompare a candidate policy", fillcolor="#F5FBFA"];
+    evidence [label="Verify published evidence\nand try a tampered copy", fillcolor="#F5FBFA"];
+    release [label="Deploy the Lab and\nrun live smoke checks", fillcolor="#FFFBF5"];
+    seal [label="Run the anchor job and\nverify publication", fillcolor="#FFFBF5"];
+    { rank=same; submit; inspect; approve; learn; control; evidence; release; seal; }
+    submit -> inspect -> approve -> learn -> control -> evidence -> release -> seal [style=invis, weight=8];
+  }
+
+  { rank=same; operator; reviewer; deployer; }
+  operator -> reviewer -> deployer [style=invis, weight=5];
+  operator -> submit;
+  operator -> inspect;
+  reviewer -> approve;
+  reviewer -> learn;
+  reviewer -> control;
+  reviewer -> evidence;
+  deployer -> release;
+  deployer -> seal;
+}

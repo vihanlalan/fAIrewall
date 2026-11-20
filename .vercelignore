@@ -1,0 +1,21 @@
+# Files `vercel deploy` must never upload from a local checkout.
+.git
+.env
+.env.*
+!.env.example
+.vercel
+.venv
+venv
+**/__pycache__
+*.sqlite
+*.sqlite-*
+*.db
+*.zip
+*.bundle
+lab-data
+tests
+docs
+examples
+tools
+benchmark_suite.py
+scratch_*.py

@@ -9,11 +9,16 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     ap.add_argument("--data", default=None, help="Data directory or postgresql:// URL "
                                                  "(else FAIREWALL_DATABASE_URL or LAB_DATA_DIR)")
-    ap.add_argument("--migrate", action="store_true",
-                    help="Create every table and schema, seed the synthetic evidence, then exit (deploy step)")
+    job = ap.add_mutually_exclusive_group()
+    job.add_argument("--migrate", action="store_true",
+                     help="Create every table and schema, seed the synthetic evidence, then exit (deploy step)")
+    job.add_argument("--anchor", action="store_true", help="Seal and publish Lab audit records, then exit")
     args = ap.parse_args()
     if args.data:
         os.environ["LAB_DATA_DIR" if "://" not in args.data else "FAIREWALL_DATABASE_URL"] = args.data
+    if args.anchor:
+        from .runtime import run_anchor_from_env
+        raise SystemExit(run_anchor_from_env())
     if args.migrate:
         from .runtime import from_env
         lab = from_env()

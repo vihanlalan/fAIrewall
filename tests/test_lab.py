@@ -141,7 +141,9 @@ def test_ch8_freeze_is_seen_by_both_gateways_and_refuses_dispatch(lab, ws):
     assert lab.unfreeze(ws)["released"]
 
 
-def test_ch9_evidence_proof_and_tamper(lab, ws):
+def test_ch9_evidence_proof_and_tamper(lab, ws, monkeypatch):
+    from fairewall.lab.runtime import run_anchor_from_env
+
     ev = lab.evidence(ws)
     assert ev["synthetic_proof"]["record"]["synthetic"] is True and ev["proof_check"]["valid"]
     t = lab.tamper(ws)
@@ -149,7 +151,11 @@ def test_ch9_evidence_proof_and_tamper(lab, ws):
     lab.start_run(ws, chapter=1)
     fresh = lab.evidence(ws)["fresh"]
     assert fresh and not any(f["anchored"] for f in fresh)
-    lab.anchor_now()
+    monkeypatch.setenv("LAB_DATA_DIR", str(lab.data))
+    monkeypatch.delenv("FAIREWALL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("FAIREWALL_ANCHOR_BUCKET", raising=False)
+    monkeypatch.delenv("FAIREWALL_ANCHOR_KEY", raising=False)
+    assert run_anchor_from_env() == 0
     assert all(f["anchored"] for f in lab.evidence(ws)["fresh"])
 
 
@@ -327,12 +333,14 @@ def test_remote_gateway_over_http_sees_the_lab_freeze(tmp_path, monkeypatch):
             break
         _time.sleep(0.05)
     monkeypatch.setattr(rt, "_id_token", lambda audience: "google-identity-token")
+    monkeypatch.setenv("K_SERVICE", "http-test-gateway")
     try:
         url = "http://127.0.0.1:%d" % port
         lab = Lab(str(data), gateway_urls={"gateway-a": url, "gateway-b": url}, gateway_key="gw-key")
         ws = lab.create_workspace()["workspace"]
         out = lab.freeze(ws)
         assert [g["mode"] for g in out["gateways"]] == ["remote service", "remote service"]
+        assert [g["service"] for g in out["gateways"]] == ["http-test-gateway", "http-test-gateway"]
         assert all(g["observed"] and "killswitch.frozen" in g["rule_ids"] for g in out["gateways"])
         assert all(g["propagation_ms"] < 5000 for g in out["gateways"])
     finally:

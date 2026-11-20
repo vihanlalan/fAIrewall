@@ -78,3 +78,8 @@ examples/refunds/.env
 *.sqlite-wal
 *.sqlite-shm
 *.db
+
+# Vercel
+.vercel/
+.env.local
+.env*.local

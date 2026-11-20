@@ -317,10 +317,14 @@ def create_app(
     @app.post("/v1/inspect/tool")
     async def inspect_tool_endpoint(
         payload: InspectToolPayload,
+        response: Response,
         authorization: Optional[str] = Header(None),
         x_api_key: Optional[str] = Header(None),
     ) -> Dict[str, Any]:
         _require_auth(authorization, x_api_key)
+        # The deployment's own name (Cloud Run sets K_SERVICE; elsewhere set FAIREWALL_GATEWAY_NAME).
+        if service := os.environ.get("FAIREWALL_GATEWAY_NAME") or os.environ.get("K_SERVICE"):
+            response.headers["X-Fairewall-Gateway"] = service
         principal = Principal(id=payload.principal_id, roles=payload.principal_roles)
         ctx = firewall.session(session_id=payload.session_id, principal=principal)
         with firewall.session_lock(ctx.session_id):

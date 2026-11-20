@@ -180,7 +180,7 @@ PROJECT_ID=your-project ./deploy/gcp/deploy.sh
 LAB_URL=https://... ./deploy/gcp/smoke.sh
 ```
 
-See [deploy/gcp/README.md](deploy/gcp/README.md).
+See the [product explanation and diagrams](docs/fairewall-lab.md), the [Vercel runbook](deploy/vercel/README.md) (Vercel + Neon + Gemini + Model Armor, no Cloud Run needed) and the [Google Cloud runbook](deploy/gcp/README.md).
 
 ---
 

@@ -86,7 +86,7 @@
       <div class="card" id="chapter-card"></div>
       <div class="grid3">
         <section class="box" aria-label="Agent chat"><h3>Agent chat</h3><div class="body" id="chat"></div></section>
-        <section class="box" aria-label="Reviewer inbox"><h3>Reviewer inbox</h3><div class="body" id="inbox"></div></section>
+        <section class="box" aria-label="Reviewer inbox"><h3>Reviewer inbox</h3><div class="body" id="demo-inbox"></div></section>
         <section class="box" aria-label="What fAIrewall did"><h3>What fAIrewall did</h3><div class="body" id="trace"></div></section>
       </div>
     </div>
@@ -209,7 +209,7 @@ function renderDemo() {
       $("#lim").innerHTML = `<p class="small muted">Measured from this deployment's own traces (environment: <b>${esc(l.environment)}</b>). Policy time includes any detector called during the decision.</p><table>${m}</table><h3 style="font:700 1.1rem var(--ui);margin:14px 0 6px">What each layer cannot do</h3><table>${l.limits.map(x => `<tr><td><b>${esc(x.layer)}</b></td><td>${esc(x.limit)}</td></tr>`).join("")}</table>`;
     });
   }
-  renderChat(); renderInbox();
+  renderChat(); renderInbox($("#demo-inbox"));
 }
 
 async function guard(fn) { try { return await fn(); } catch (e) { toast(e.message); return null; } }
@@ -246,8 +246,8 @@ async function renderChat() {
   el.innerHTML = h;
   renderTrace();
 }
-async function renderInbox() {
-  const el = $("#inbox"); const box = await guard(() => api("/api/inbox", {}, "review")); if (!box) return;
+async function renderInbox(el) {
+  const box = await guard(() => api("/api/inbox", {}, "review")); if (!box || !el.isConnected) return;
   let h = `<div class="small muted">Acting as the simulated reviewer for this sandbox.</div>`;
   h += box.actions.length ? "" : `<p class="muted small">No held actions.</p>`;
   for (const x of box.actions) h += `<div class="ev"><div class="hrow"><b>${esc(x.tool)}</b>${pill("pending","held")}${x.amount_display ? `<span>${esc(x.amount_display)}</span>` : ""}</div><div class="small">Source: ${esc(x.source)} · run <span class="mono">${esc(x.run_id.slice(0,24))}</span></div><div class="small">Why: ${x.reasons.map(r => `<span class="mono">${esc(r)}</span>`).join(", ")}</div><pre>${esc(JSON.stringify(x.arguments))}</pre><div class="small muted">Expires ${new Date(x.expires_at*1000).toLocaleTimeString()}</div><div class="hrow"><button class="btn ok" data-rev="${esc(x.action_id)}" data-ok="1">Approve</button><button class="btn no" data-rev="${esc(x.action_id)}" data-ok="0">Reject</button></div></div>`;
@@ -328,10 +328,11 @@ async function renderConsole() {
   document.querySelectorAll("#console .sub button").forEach(b => { b.setAttribute("aria-current", b.dataset.c === consoleSec); b.onclick = () => go("#/console/" + b.dataset.c); });
   const el = $("#cbody");
   if (consoleSec === "review") {
-    el.innerHTML = `<div class="grid3" style="grid-template-columns:1fr 1fr"><section class="box"><h3>Approvals &amp; learning</h3><div class="body" id="inbox"></div></section><section class="box"><h3>Runs</h3><div class="body" id="runlist"></div></section></div>`;
-    renderInbox();
+    el.innerHTML = `<div class="grid3" style="grid-template-columns:1fr 1fr"><section class="box"><h3>Approvals &amp; learning</h3><div class="body" id="console-inbox"></div></section><section class="box"><h3>Runs</h3><div class="body" id="runlist"></div></section></div>`;
+    renderInbox($("#console-inbox"));
+    const runList = $("#runlist");
     const r = await guard(() => api("/api/runs", {}, "review"));
-    if (r) $("#runlist").innerHTML = `<table>${r.runs.map(x => `<tr><td><a href="#/demo/${x.chapter && !String(x.chapter).startsWith("check") ? "ch/" + parseInt(x.chapter) : "free"}/run/${esc(x.id)}" class="mono">${esc(x.id)}</a></td><td>${esc(x.chapter)}</td><td>${pill(x.status)}</td><td><span class="tag ${x.proposal_source === "live" ? "live" : "rec"}">${esc(x.proposal_source)}</span></td></tr>`).join("")}</table>`;
+    if (r && runList.isConnected) runList.innerHTML = `<table>${r.runs.map(x => `<tr><td><a href="#/demo/${x.chapter && !String(x.chapter).startsWith("check") ? "ch/" + parseInt(x.chapter) : "free"}/run/${esc(x.id)}" class="mono">${esc(x.id)}</a></td><td>${esc(x.chapter)}</td><td>${pill(x.status)}</td><td><span class="tag ${x.proposal_source === "live" ? "live" : "rec"}">${esc(x.proposal_source)}</span></td></tr>`).join("")}</table>`;
   } else if (consoleSec === "audit") {
     el.innerHTML = `<div class="hrow" style="margin-bottom:8px"><input id="f-run" placeholder="run id"><input id="f-act" placeholder="action id"><select id="f-out"><option value="">any verdict</option><option>approve</option><option>human</option><option>block</option></select><input id="f-rule" placeholder="rule id contains"><input id="f-gw" placeholder="gateway"><button class="btn" id="f-go">Filter</button></div><div class="box"><div class="body" id="audit"></div></div>`;
     const load = async () => {
@@ -354,7 +355,7 @@ async function renderConsole() {
   }
 }
 
-function refreshAll() { if (!$("#demo").hidden) { renderChat(); renderInbox(); } else renderConsole(); }
+function refreshAll() { if (!$("#demo").hidden) { renderChat(); renderInbox($("#demo-inbox")); } else renderConsole(); }
 
 (async function init() {
   try {
