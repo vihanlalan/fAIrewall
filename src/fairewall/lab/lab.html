@@ -20,6 +20,7 @@
   .tabs button[aria-selected=true]{background:var(--ink);color:#fff}
   main{padding:14px 24px 40px}
   .layout{display:grid;grid-template-columns:270px 1fr;gap:16px;align-items:start}
+  #demo > .hero{width:100%;margin-bottom:16px}
   .tourrail{border:2px solid var(--ink);background:var(--sheet)}
   .tourrail h3,.box h3{margin:0;background:var(--ink);color:#fff;font:600 .78rem var(--mono);text-transform:uppercase;letter-spacing:.04em;padding:9px 12px}
   .tourrail button{display:block;color:var(--ink);width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);padding:9px 12px;cursor:pointer;font:inherit;min-height:40px}
@@ -74,6 +75,26 @@
 
 <main>
 <section id="demo" role="tabpanel" aria-labelledby="tab-demo">
+<div class="wrap hero">
+      <div class="hero-copy">
+        <h1>Inspect<br><em>the call.</em></h1>
+        <p>Follow a refund request from the agent’s proposal through the policy check to the sandbox ledger.</p>
+        <div class="walk-controls">
+          <button class="button primary" id="hero-run" disabled>Run a Gemini refund</button>
+          <label for="hero-source">Proposal source</label>
+          <select id="hero-source"><option value="recorded">Recorded walkthrough · scripted</option></select>
+        </div>
+      </div>
+      <div class="apparatus">
+        <div class="plate"><b>Signal inspection</b><span id="scope-state">Standby</span></div>
+        <div role="group" aria-label="Policy gate diagram" aria-describedby="scope-help">
+          <canvas id="scope" aria-label="Animated diagram of a tool request passing through policy gates">Use the Request, Policy, and Verdict controls for a text description.</canvas>
+        </div>
+        <p class="scope-help" id="scope-help">Scroll down for the next stage or up for the previous one. You can also choose a stage below.</p>
+        <div class="switches" aria-label="Inspect a checkpoint stage"><button data-stage="0" aria-pressed="true">Request</button><button data-stage="1" aria-pressed="false">Policy</button><button data-stage="2" aria-pressed="false">Verdict</button></div>
+        <div id="instrument" aria-live="polite"></div>
+      </div>
+    </div>
   <div class="layout">
     <nav class="tourrail" aria-label="Tour">
       <h3>Guided tour</h3><div id="tour"></div>
@@ -105,6 +126,7 @@
 </section>
 </main>
 
+<script src="/ui/assets/checkpoint.js"></script>
 <script>
 (() => {
 const $ = s => document.querySelector(s), esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -215,17 +237,32 @@ function renderDemo() {
 async function guard(fn) { try { return await fn(); } catch (e) { toast(e.message); return null; } }
 function toast(msg) { const n = document.createElement("div"); n.className = "note"; n.setAttribute("role", "alert"); n.textContent = msg; $("#chapter-card").prepend(n); setTimeout(() => n.remove(), 6000); }
 
-async function startRun(body) {
+async function startRun(body, destination = place) {
   const r = await guard(() => api("/api/runs", {method:"POST", body:JSON.stringify(body)}));
-  if (r) { currentRun = r.run_id; lastRun = r; go("#/demo/" + (place.view === "ch" ? "ch/" + place.ch : place.view) + "/run/" + r.run_id); }
+  if (r) { place = destination; currentRun = r.run_id; lastRun = r; go("#/demo/" + (place.view === "ch" ? "ch/" + place.ch : place.view) + "/run/" + r.run_id); }
 }
 let lastRun = null;
 async function loadRun() {
   if (!currentRun) { lastRun = null; return null; }
   lastRun = await guard(() => api("/api/runs/" + currentRun)); return lastRun;
 }
+function inspectRun(run) {
+  const decisions = run?.trace.filter(e => ["submit","review","screen"].includes(e.event)) || [];
+  const latest = decisions.at(-1);
+  if (!latest) { window.setInspectionSignal(null, true); return; }
+  const verdict = {approve:"allow", human:"escalate", block:"block"}[latest.outcome];
+  if (!verdict) { window.setInspectionSignal(null, true); return; }
+  const tool = latest.evidence.tool || run.input.kind;
+  const action = run.agent?.actions.find(a => a.action_id === latest.action_id);
+  const request = action ? tool + "(" + JSON.stringify(action.arguments) + ")" : tool;
+  window.setInspectionSignal({id:run.run_id + "/" + latest.seq, verdict,
+    labels:[request, latest.rule_ids.join(", ") || "Checked against policy " + run.policy.version,
+      tool + " · " + latest.outcome]}, true);
+}
 async function renderChat() {
   const run = await loadRun(), el = $("#chat");
+  if (run && run.run_id !== currentRun) return;
+  inspectRun(run);
   if (!run) { el.innerHTML = `<p class="muted">Run a chapter or send something in Free play. What reached the agent, what it proposed, and what the sandbox received appear here.</p>`; renderTrace(); return; }
   const a = run.agent, src = run.proposal_source;
   let h = `<div class="hrow"><b>Run</b> <span class="mono">${esc(run.run_id)}</span>${pill(run.status)}</div>`;
@@ -363,6 +400,19 @@ function refreshAll() { if (!$("#demo").hidden) { renderChat(); renderInbox($("#
     await ensureSandbox(false);
     try { await api("/api/runs"); } catch (e) { await ensureSandbox(true); }
   } catch (e) { document.querySelector("main").innerHTML = `<div class="card">Could not start the Lab: ${esc(e.message)}</div>`; return; }
+  const heroSource = $("#hero-source");
+  if (status.gemini) {
+    heroSource.add(new Option("Live Gemini · " + status.gemini_model, "live"));
+    heroSource.value = "live";
+  }
+  const heroRun = $("#hero-run");
+  heroRun.disabled = false;
+  heroRun.onclick = async () => {
+    heroRun.disabled = true;
+    try {
+      await startRun({chapter:1, source:heroSource.value}, {view:"ch", ch:1});
+    } finally { heroRun.disabled = false; }
+  };
   $("#reset").onclick = async () => { await ensureSandbox(true); currentRun = null; lastRun = null; go("#/demo/ch/1"); };
   if (!location.hash) location.hash = "#/demo/ch/" + (place.ch || 1);
   route();

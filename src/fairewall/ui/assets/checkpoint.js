@@ -65,3 +65,42 @@ window.checkpoint = (() => {
     stage=nextStage;verdict=nextVerdict;session=nextSession;schedule();
   }};
 })();
+
+window.setInspectionSignal = (() => {
+  let signal = null;
+  const stageButtons = [...document.querySelectorAll(".switches button")];
+  let activeStage = 0;
+  function inspectStage(index) {
+    activeStage = index;
+    stageButtons.forEach((button,i)=>button.setAttribute("aria-pressed",String(i===index)));
+    document.getElementById("instrument").textContent = (signal?.labels || ["Awaiting a tool proposal","Check tool access, trust and limits","Run a scenario to see its verdict"])[index];
+    document.getElementById("scope-state").textContent = signal ? signal.verdict.toUpperCase() : "Standby";
+    document.getElementById("scope-state").dataset.verdict = signal?.verdict || "";
+    window.checkpoint.update(index, signal?.verdict || "", signal?.id || "");
+  }
+  stageButtons.forEach((button,i)=>button.onclick=()=>inspectStage(i));
+  let lastWheelTime = -Infinity;
+  let lastDirection = 0;
+  document.querySelector(".apparatus").addEventListener("wheel", event => {
+    if (event.ctrlKey || !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const direction = Math.sign(event.deltaY);
+    const next = activeStage + direction;
+    const now = performance.now();
+    const continuing = direction === lastDirection && now - lastWheelTime < 160;
+    lastWheelTime = now;
+    lastDirection = direction;
+    // Keep trackpad momentum from skipping stages. A fresh scroll at either end moves the page.
+    if (!continuing && (next < 0 || next >= stageButtons.length)) {
+      lastDirection = 0;
+      return;
+    }
+    event.preventDefault();
+    if (!continuing) inspectStage(next);
+  }, {passive:false});
+  inspectStage(0);
+  return (nextSignal, preserveStage = false) => {
+    const changed = signal?.id !== nextSignal?.id;
+    signal = nextSignal;
+    inspectStage(preserveStage && !changed ? activeStage : signal ? 2 : 0);
+  };
+})();
