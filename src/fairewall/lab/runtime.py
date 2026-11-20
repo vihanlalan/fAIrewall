@@ -1057,7 +1057,7 @@ def from_env() -> Lab:
     armor = None
     if os.environ.get("MODEL_ARMOR_TEMPLATE"):
         from ..integrations.model_armor import ModelArmorDetector
-        armor = ModelArmorDetector(os.environ["MODEL_ARMOR_TEMPLATE"])
+        armor = ModelArmorDetector(os.environ["MODEL_ARMOR_TEMPLATE"].strip())
     gateways = {}
     for name, var in (("gateway-a", "LAB_GATEWAY_A_URL"), ("gateway-b", "LAB_GATEWAY_B_URL")):
         if os.environ.get(var):

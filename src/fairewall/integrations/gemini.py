@@ -159,7 +159,7 @@ class GeminiClient:
         except ImportError as exc:  # pragma: no cover - env dependent
             raise ModelError("not_configured", "Live runs need `pip install fairewall[gemini]`.") from exc
         self._types = types
-        self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+        self.model = (model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL).strip()
         if vertex is None:
             vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true")
         http = types.HttpOptions(timeout=int(timeout_s * 1000))

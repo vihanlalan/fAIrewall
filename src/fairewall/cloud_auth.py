@@ -41,13 +41,13 @@ def federation_settings(env: MutableMapping[str, str]) -> Optional[Dict[str, str
     Also accepts the pieces separately: GCP_PROJECT_NUMBER, GCP_WORKLOAD_IDENTITY_POOL_ID,
     GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID, GCP_SERVICE_ACCOUNT_EMAIL (Vercel's documented names).
     """
-    audience = env.get("GCP_WIF_AUDIENCE", "")
+    audience = env.get("GCP_WIF_AUDIENCE", "").strip()
     if not audience and all(env.get(v) for v in ("GCP_PROJECT_NUMBER", "GCP_WORKLOAD_IDENTITY_POOL_ID",
                                                   "GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID")):
         audience = "//iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/providers/%s" % (
             env["GCP_PROJECT_NUMBER"], env["GCP_WORKLOAD_IDENTITY_POOL_ID"],
             env["GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID"])
-    account = env.get("GCP_ARMOR_SERVICE_ACCOUNT") or env.get("GCP_SERVICE_ACCOUNT_EMAIL") or ""
+    account = (env.get("GCP_ARMOR_SERVICE_ACCOUNT") or env.get("GCP_SERVICE_ACCOUNT_EMAIL") or "").strip()
     if not audience or not account:
         return None
     return {"audience": audience, "service_account": account}
