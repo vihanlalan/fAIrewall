@@ -15,32 +15,32 @@ main#content { max-width: none; margin-inline: auto; padding: 0; }
 .walk-controls .button { margin-right: 5px; }
 .walk-controls select { max-width: 100%; }
 .section-nav { padding: 0; gap: 0; overflow-x: auto; }
-.section-nav .tab { flex: none; margin: 0; min-height: 44px; padding: 9px 14px; color: var(--ink); border: 0; border-right: 1px solid var(--ink); font-weight: 650; }
-.section-nav .tab[aria-selected=true] { background: var(--ink); color: var(--sheet); }
+.section-nav .tab { flex: none; margin: 0; min-height: 44px; padding: 9px 14px; color: var(--ink); border: 0; border-right: 1px solid var(--line); font-weight: 650; }
+.section-nav .tab[aria-selected=true] { background: var(--paper); color: var(--sheet); }
 #demo-view > section { min-width: 0; }
 #demo-view h2, .console-main h1, .console-main h2 { font: 700 clamp(1.8rem,3.3vw,3.4rem)/1.05 var(--ui); letter-spacing: -.035em; margin-bottom: 12px; }
 .lead { max-width: 76ch; margin: 0 0 20px; color: var(--muted); }
-.btn { display: inline-flex; justify-content: center; align-items: center; min-height: 42px; padding: 8px 14px; font-weight: 650; background: var(--sheet); border: 1.5px solid var(--ink); border-radius: 0; }
+.btn { display: inline-flex; justify-content: center; align-items: center; min-height: 42px; padding: 8px 14px; font-weight: 650; background: var(--sheet); border: 1.5px solid var(--line); border-radius: 0; }
 .btn:hover:not(:disabled), .row:hover { background: var(--blue-bg); }
-.btn.primary, .btn.inline-review[data-choice=approve] { background: var(--ink); color: white; }
+.btn.primary, .btn.inline-review[data-choice=approve] { background: var(--paper); color: white; }
 .btn.primary:hover:not(:disabled), .btn.inline-review[data-choice=approve]:hover { background: #36362e; }
 .keylabel, .walk-cards dt { font: 600 .76rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
 .card, .panel, .trace-intro, .scenarios, .pipe, .side, .empty, .status, .email, .appr-args { border-radius: 0; }
-.card, .panel, .trace-intro, .scenarios { border: 2px solid var(--ink); background: var(--sheet); }
+.card, .panel, .trace-intro, .scenarios { border: 2px solid var(--line); background: var(--sheet); }
 .trace-intro, #stage>.empty { background: var(--sheet); }
 .scenario { display: block; width: 100%; }
 .scenario.active, .row[aria-pressed=true] { background: var(--signal); box-shadow: none; }
-.walk-cards .keylabel { background: var(--ink); color: white; margin: -18px -18px 15px; padding: 10px 18px; }
+.walk-cards .keylabel { background: var(--paper); color: white; margin: -18px -18px 15px; padding: 10px 18px; }
 .walk-cards h3, #buyer-out h3, .request-head h3 { font: 650 1.55rem/1.1 var(--ui); }
 .walk-cards details { border-top: 1px solid var(--line); padding-top: 10px; }
 #walk-status:not(:empty) { margin-block: 14px; }
 #walk-cards:not(:empty) { margin-top: 16px; }
 #tab-walk > a, #tab-integrations > a { text-decoration: underline; text-underline-offset: .2em; }
 .console-main { min-width: 0; }
-.console-main form { background: var(--sheet); border: 2px solid var(--ink); padding: 18px; }
-.console-main input, .walk-controls select { min-height: 42px; border: 1px solid var(--ink); padding: 6px 10px; }
+.console-main form { background: var(--sheet); border: 2px solid var(--line); padding: 18px; }
+.console-main input, .walk-controls select { min-height: 42px; border: 1px solid var(--line); padding: 6px 10px; }
 .console-main .layout { margin-top: 12px; }
-.company-footer { text-align: left; border-top: 2px solid var(--ink); margin-top: 36px; align-items: center; }
+.company-footer { text-align: left; border-top: 2px solid var(--line); margin-top: 36px; align-items: center; }
 .company-footer nav { overflow: visible; }
 @media(max-width:680px) {
   .section-nav { flex-wrap: nowrap; }
@@ -50,3 +50,24 @@ main#content { max-width: none; margin-inline: auto; padding: 0; }
 }
 #overview-data dd { margin: 4px 0 0; font: 650 1.35rem/1.15 var(--ui); }
 #overview-data dt { color: var(--muted); font-size: .85rem; }
+
+.hero-copy, .contact-section { background: var(--sheet); }
+.hero-copy h1 em { color: var(--signal); }
+.hero-copy p { color: var(--muted); }
+.hero-copy .primary { box-shadow: none; }
+.button.primary, .hero-copy .primary, .btn.primary, .btn.inline-review[data-choice=approve],
+.section-nav .tab[aria-selected=true], .scenario.active, .row[aria-pressed=true],
+.rail nav a[aria-current], .rail nav a[aria-current]:hover {
+  background: var(--signal); color: var(--on-signal); border-color: var(--signal);
+}
+.btn.primary:hover:not(:disabled), .button.primary:hover:not(:disabled),
+.btn.inline-review[data-choice=approve]:hover { background: var(--blue-dark); color: var(--on-signal); }
+.scenario.active span, .row[aria-pressed=true] span { color: inherit; }
+.row, .scenario { background: var(--sheet); color: var(--ink); }
+.scenario:hover:not(.active), .row:hover:not([aria-pressed=true]) { background: var(--wash); }
+input, select, textarea, .walk-controls select { background: var(--wash); color: var(--ink); }
+.badge, .ico.block, .ico.escalate { color: var(--paper); }
+.pill.allow { color: var(--allow); background: var(--allow-bg); }
+.pill.escalate { color: var(--review); background: var(--review-bg); }
+.pill.block { color: var(--block); background: var(--block-bg); }
+:focus-visible { outline-color: var(--signal); }

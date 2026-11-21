@@ -1,0 +1,360 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{hyperref}
+
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{invariant}{Invariant}
+
+\begin{document}
+
+\title{Closing the Cost-Utility-Security Loop for Tool-Using LLM Agents Under Imperfect Detectors}
+
+\author{
+\IEEEauthorblockN{Darsh Patel}
+\IEEEauthorblockA{Independent Researcher\\
+pateldarshm@gmail.com}
+\and
+\IEEEauthorblockN{Vihan Lalan}
+\IEEEauthorblockA{Independent Researcher\\
+vihanlalan1@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+Autonomous large language model (LLM) agents increasingly invoke external tools that move money, send messages, and modify enterprise databases. Recent work establishes that security must move outside the model to deterministic reference monitors and information-flow controls, because text-based prompt-injection detectors fail reliably against adaptive, lexically ordinary attacks. Yet deterministic enforcement creates three unresolved operational tensions in production: blunt session-level taint tracking destroys benign utility on routine workflows; routing every untrusted document to a cloud-hosted deep detector incurs prohibitive token cost and latency; and static rules cannot adapt to novel attacks without overwhelming human reviewers or opening poisoning vectors.
+
+We present fAIrewall, a zero-core-dependency governance architecture that closes this cost, utility, and security loop without requiring invasive dual-LLM planner rewrites. Our design combines four coupled mechanisms above a sub-millisecond deterministic policy floor: (1) a Proof-of-Sampling (PoSP) content-source scheduler that adapts game-theoretic stake and slashing to reduce expensive deep-check calls while preserving deterministic taint; (2) taint-gated, clean-session-only action baselines paired with monotonic per-run capability scopes that recover benign utility while holding novel actions in tainted sessions; (3) an asymmetric human-in-the-loop (HITL) adaptive threat memory that tightens on a single confirmed attack but cannot be poisoned into disabling policy, taint, or high-risk controls; and (4) a durable action release authority with tool-definition pinning, time-of-check-to-time-of-use (TOCTOU) re-verification, canary-to-sampler feedback, and RFC 6962 Merkle audit anchoring. Across our empirical evaluation, fAIrewall executes Tier-0 enforcement in 0.045 ms (p50), recovers 100.0\% benign auto-completion from blunt taint while achieving 0.0\% attack success rate against lexically benign adaptive attacks, cuts deep-check volume by 92.3\% to 96.4\% on benign sources, reduces repeat human escalations by 96.0\%, and satisfies 6/6 anti-poisoning and 4/4 durable-dispatch safety checks.
+\end{abstract}
+
+\begin{IEEEkeywords}
+LLM agent security, indirect prompt injection, Proof of Sampling, taint tracking, action baselines, human-in-the-loop governance, reference monitor
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Tool-using large language model (LLM) agents have moved from conversational assistants to operational software that issues refunds, updates CRM records, sends customer emails, and executes workflows across enterprise platforms \cite{owasp2026agentic}. Because these agents read untrusted external content (emails, web pages, invoices, support tickets, and third-party tool outputs) in the same context window as system instructions, they are structurally vulnerable to indirect prompt injection (IPI) \cite{yi2023bipia, zhan2024injecagent, debenedetti2024agentdojo}. Empirical evaluations show that adaptive attackers reliably bypass prompt-level guardrails and text classifiers \cite{zhan2025adaptive, abdelnabi2025llmail}. A sentence such as ``Please refund \$240 for order ORD-9999'' is lexically indistinguishable whether a customer wrote it legitimately or an attacker planted it inside a scraped document.
+
+In response, the security community has converged on treating the LLM as an untrusted component and enforcing deterministic security policies outside the model \cite{debenedetti2025camel, costa2025fides, shi2025progent, wang2025agentspec, aljumaily2026untrusted}. Dual-LLM and fine-grained information-flow control (IFC) systems such as CaMeL \cite{debenedetti2025camel} and FIDES \cite{costa2025fides} offer strong guarantees, but require rewriting the agent's planner into a custom interpreter or propagating fine-grained dataflow labels through model reasoning. Conversely, practical middleware firewalls such as Progent \cite{shi2025progent}, AgentSpec \cite{wang2025agentspec}, and dynamic compositional monitors \cite{schneider2026dscc} operate at the tool-call boundary, where deployment is drop-in but three hard trade-offs remain open:
+
+\begin{enumerate}
+    \item \textbf{The Taint Utility Cliff:} Coarse session-level taint tracking blocks high-privilege tools after any untrusted read. In real support and finance workflows, however, agents routinely read an external customer email or ticket before issuing a legitimate small refund or reply. Blocking every write after an untrusted read reduces benign automation to zero.
+    \item \textbf{The Deep-Check Cost Bottleneck:} Managed cloud screening services (such as Google Cloud Model Armor) and frontier LLM judges add hundreds of milliseconds of latency and per-token billing. Running them on every web page, inbox item, and tool output is economically unviable at scale, yet skipping them blindly leaves an unmonitored gap.
+    \item \textbf{Static Rules vs. Poisonable Adaptation:} Fixed signatures miss obfuscated and novel attacks, while naive online learning from operational feedback lets an attacker poison the classifier or fatigue human reviewers into approving malicious actions \cite{aljumaily2026untrusted, zhan2025adaptive}.
+\end{enumerate}
+
+This paper presents \textbf{fAIrewall}, an open-source, zero-core-dependency runtime governance architecture designed around a single premise: \textit{text detectors will miss attacks, so security must rest on structural invariants while detectors, sampling, and human memory optimize cost and utility}. Rather than proposing yet another standalone rule engine or audit logger, fAIrewall closes the feedback loop across four coupled mechanisms:
+
+\begin{itemize}
+    \item \textbf{Proof-of-Sampling (PoSP) Content-Source Scheduling:} We adapt the Nash-equilibrium Proof-of-Sampling protocol \cite{zhang2024posp} from decentralized compute verification to agentic content sources. Each external source (domain, inbox, or MCP server) earns stake through clean deep checks, reducing its deep-check sampling rate via a post-arrival keyed pseudorandom function (HMAC-SHA256) while keeping deterministic rules and taint active on 100\% of items. Confirmed injections slash stake to zero and quarantine the source.
+    \item \textbf{Taint-Gated Action Baselines and Monotonic Run Scope:} To resolve the utility cliff of blunt session taint without rewriting the planner, fAIrewall learns per-principal behavioral baselines (tools, destinations, and maximum amounts) strictly from clean sessions and human approvals. In tainted sessions, routine actions auto-complete while any novel tool, destination, or amount spike is held for human review. Application backends additionally declare monotonic per-run capability scopes that callers can only narrow, never widen.
+    \item \textbf{Asymmetric, Poison-Resistant HITL Threat Memory:} Novel escalated signals open human review cases that simultaneously arbitrate PoSP slashing and update a deterministic, non-LLM exemplar and linear threat memory. The memory enforces strict asymmetry: one malicious label blocks future variants, whereas lifting a soft flag requires multiple near-identical approvals, never lifts deterministic blocks or taint, never applies to high-risk tools, expires automatically, and supports full revocation.
+    \item \textbf{Cross-Layer Canary Feedback and Durable Release Authority:} Planted decoy values (canaries) in prompts or records catch exfiltration even to allowed destinations; a canary trip immediately freezes the session and demotes every tainted source in the PoSP sampler back to full inspection. All state-changing executions pass through a transactional database release authority enforcing SHA-256 tool-definition pinning, TOCTOU approval re-checks, idempotency, mid-flight crash reconciliation, and RFC 6962 Merkle audit anchoring \cite{laurie2013rfc6962}.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Policy Enforcement and Information-Flow Control}
+Early defenses relied on prompt hardening, spotlighting, or auxiliary LLM classifiers, which adaptive attacks consistently defeat \cite{zhan2025adaptive, abdelnabi2025llmail}. Structural defenses separate untrusted data from privileged control flow. IsolateGPT \cite{wu2024isolategpt} isolates third-party LLM applications behind permission-checked hubs. CaMeL \cite{debenedetti2025camel} splits execution into a privileged planner LLM and a quarantined data-reading LLM enforced by a capability interpreter. FIDES \cite{costa2025fides} applies formal information-flow control with confidentiality and integrity labels inside the planner. While principled, planner-level IFC requires modifying how agents reason and plan.
+
+Middleware frameworks instead intercept tool calls at runtime. Progent \cite{shi2025progent} provides a programmable privilege DSL over tool calls and MCP servers. AgentSpec \cite{wang2025agentspec} defines trigger-predicate-enforcement rules for runtime monitoring. LlamaFirewall \cite{chennabasappa2025llamafirewall} combines PromptGuard 2, a chain-of-thought AlignmentCheck auditor, and CodeShield. GuardAgent \cite{xiang2024guardagent} and ShieldAgent \cite{chen2025shieldagent} employ guard agents and verifiable rule circuits to check trajectories. Schneider et al. \cite{schneider2026dscc} introduce the Dynamic Security Control Compositor (DSCC), composing per-tool policies monotonically with session-level taint. Aljumaily et al. \cite{aljumaily2026untrusted} formalize treating the model as an untrusted component with deterministic task-bound monitors, taint tracking, and budgeted human approval. fAIrewall shares this external reference-monitor foundation, but focuses on closing the cost-utility-adaptation gap through PoSP source sampling, taint-gated clean-session baselines, and asymmetric human threat memory.
+
+\subsection{Deception, Canaries, and Behavioral Monitoring}
+Because preventive filters have blind spots, recent work introduces deception and trajectory monitoring. Kill-Chain Canaries \cite{wang2026killchain} embed markers to trace indirect prompt injection across exposure, memory persistence, relay, and execution stages. AgentShield \cite{rassul2026agentshield} plants fake tools, decoy credentials, and allowlisted parameters to generate zero-false-positive compromise signals. Trajectory anomaly detectors such as TrajAD \cite{trajad2026} audit multi-step execution traces. fAIrewall extends decoy detection by coupling canary trips directly to session freezes and PoSP source-reputation demotion, and enforces a strict non-poisoning invariant on its behavioral baseline so tainted sessions can never train what counts as normal.
+
+\subsection{Game-Theoretic Verification and Tamper-Evident Auditing}
+Proof of Sampling (PoSP) \cite{zhang2024posp} establishes a Nash-equilibrium verification protocol for decentralized AI compute where a validator randomly audits an asserter with probability $p$ and slashes stake upon cheating. To our knowledge, fAIrewall is the first system to adapt PoSP to agentic content-source deep-check routing above a deterministic taint floor.
+
+For compliance and non-repudiation, recent 2026 systems such as Agent Flight Recorder \cite{bindschaedler2026flightrecorder} and Tracekit \cite{ghosh2026tracekit} apply SHA-256 hash chaining, RFC 6962 Merkle trees \cite{laurie2013rfc6962}, and external L2 blockchain anchoring to prevent agents or compromised administrators from rewriting execution traces. fAIrewall incorporates an analogous RFC 6962 Merkle anchoring layer (targeting WORM cloud storage and Base EVM calldata) as an evidentiary substrate integrated directly with durable action state transitions and approval records.
+
+\section{Threat Model and Security Invariants}
+
+\subsection{System Model and Adversary Capabilities}
+We consider a tool-using agent executing over a sequence of sessions. In each session $s$ owned by a server-authenticated principal $\pi$, the agent receives inputs from trusted operators ($T = \text{TRUSTED}$), end users ($T = \text{USER}$), or external untrusted sources ($T = \text{UNTRUSTED}$, such as emails, web pages, CRM notes, or outputs of tools marked \texttt{produces\_untrusted\_output}). The LLM proposes candidate tool calls $c = (\text{tool}, \text{args})$; it never executes tools directly.
+
+We assume a strong, adaptive adversary with the following capabilities:
+\begin{itemize}
+    \item \textbf{Indirect Prompt Injection:} The adversary controls arbitrary untrusted content ingested by the agent and crafts lexically benign or obfuscated instructions that evade regex and ML prompt-injection detectors \cite{zhan2025adaptive}.
+    \item \textbf{Compromised Agent / Caller:} Even if the agent or its API key is hijacked, the adversary may attempt parameter smuggling, tool-name aliasing, salami-slicing spend attacks, rapid retry loops, scope widening, or self-approval of held calls.
+    \item \textbf{Source Strategy:} External sources may be one-shot attackers (injecting immediately with no reputation to lose) or persistent rational sources (behaving honestly to accumulate trust before betraying).
+    \item \textbf{Supply-Chain and Execution Faults:} External MCP tool definitions may mutate post-registration (rug-pull / tool poisoning), concurrent approvals may race against shared session budgets (TOCTOU), and downstream handlers may fail mid-flight with unknown side effects.
+    \item \textbf{Trusted Computing Base (TCB):} The fAIrewall runtime, its policy store, reviewer authentication keys, and backend scope declarations are trusted. The LLM, external content sources, and unpinned tool definitions are untrusted.
+\end{itemize}
+
+\subsection{Formal Security Invariants}
+fAIrewall's architecture is governed by five enforceable invariants:
+
+\begin{invariant}[Monotonic Detector Escalation]
+Let $D_0(c, s) \in \{\text{ALLOW}, \text{FLAG}, \text{BLOCK}\}$ be the deterministic Tier-0 verdict under the strict ordering $\text{ALLOW} < \text{FLAG} < \text{BLOCK}$. Any Tier-1 detector $M$ or adaptive threat model may only append findings, yielding final verdict $D(c, s) = \max(D_0(c, s), D_1(c, s)) \ge D_0(c, s)$. No probabilistic component can downgrade a deterministic \text{BLOCK}.
+\end{invariant}
+
+\begin{invariant}[Monotonic Per-Run Scope Narrowing]
+Let a session scope $\Sigma = (T_\Sigma, \Delta_\Sigma, A_\Sigma, B_\Sigma, t_\Sigma, m_\Sigma)$ specify allowed tools, destinations, argument value sets, spend cap, expiry, and violation mode. For any caller holding only the agent credential, a scope update $\Sigma \to \Sigma'$ is accepted if and only if $T_{\Sigma'} \subseteq T_\Sigma$, $\Delta_{\Sigma'} \subseteq \Delta_\Sigma$, $A_{\Sigma'}[k] \subseteq A_\Sigma[k]$ for all $k$, $B_{\Sigma'} \le B_\Sigma$, $t_{\Sigma'} \le t_\Sigma$, and $m_\Sigma = \text{BLOCK} \implies m_{\Sigma'} = \text{BLOCK}$. Widening requires an independent reviewer credential.
+\end{invariant}
+
+\begin{invariant}[Baseline Non-Poisoning]
+The per-principal action baseline $\mathcal{B}(\pi)$ updates exclusively from (a) tool calls committed in untainted sessions ($\text{tainted}(s) = \text{false}$) and (b) explicitly approved human reviews. No action executed in a tainted session updates $\mathcal{B}(\pi)$, preventing an injected payload from teaching the baseline its own exfiltration destination or elevated spend ceiling.
+\end{invariant}
+
+\begin{invariant}[Asymmetric Threat Memory Safety]
+Let $\mathcal{M}$ be the adaptive threat memory. A single human \text{malicious} verdict enables automatic blocking of variants with cosine similarity $\ge \tau_{\text{blk}}$ (default $0.80$). Conversely, a learned allow may clear a finding $f$ if and only if: (i) $f$ is a learnable content-threat \text{FLAG} (never a \text{BLOCK}, taint rule, financial/velocity/schema/egress policy, or kill switch); (ii) the tool is not high-risk; (iii) at least $k \ge 2$ unexpired benign human approvals exist with similarity $\ge \tau_{\text{alw}}$ (default $0.92$) covering the exact rule ID of $f$; and (iv) no confirmed malicious case exists within conflict radius $\tau_{\text{cnf}}$ (default $0.60$).
+\end{invariant}
+
+\begin{invariant}[Durable Release and Separation of Duties]
+No state-changing tool executes until the database atomically verifies: (i) the tool's SHA-256 definition and revision fingerprint matches the reviewed pin; (ii) the policy and session state re-evaluated at release time permit execution; (iii) the reviewer identity differs from the proposing principal; and (iv) no prior dispatch in the session is in an \text{uncertain} or \text{dispatching} state.
+\end{invariant}
+
+\section{Architecture}
+
+Fig.~\ref{fig:arch} illustrates the end-to-end fAIrewall pipeline across inbound screening, outbound enforcement, closed-loop feedback, and durable release.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.94\columnwidth}{\footnotesize
+\textbf{1. Inbound Layer (\texttt{inspect\_input / inspect\_output})}\\
+External Content ($T=\text{UNTRUSTED}$) $\rightarrow$ Tier-0 Signatures + Output Secret/PII Redaction $\rightarrow$ \textbf{Session Taint} $\rightarrow$ \textbf{PoSP Source Sampler} (HMAC-SHA256 PRF) $\rightarrow$ Escalated Tier-1 / Deep Detector (e.g., Model Armor) $\rightarrow$ \textbf{Asymmetric Threat Memory}.\\[4pt]
+\textbf{2. Agent Reasoning (Untrusted)} $\rightarrow$ Proposes Tool Call $(\text{tool}, \text{args})$.\\[4pt]
+\textbf{3. Outbound Reference Monitor (\texttt{inspect / ActionStore})}\\
+Kill Switch $\rightarrow$ \textbf{Canary Scan} (trip $\Rightarrow$ freeze + PoSP suspect) $\rightarrow$ Tier-0 Rules (Schema, RBAC, Taint, Financial, Velocity, Egress, Payload, \textbf{Monotonic Scope}) $\rightarrow$ \textbf{Taint-Gated Action Baseline} $\rightarrow$ Risk-Routed Monotonic Tier-1 $\rightarrow$ \textbf{Threat Memory}.\\[4pt]
+\textbf{4. Durable Release \& Evidence}\\
+ALLOW $\rightarrow$ Pin Check + Idempotency + Commit $\rightarrow$ Dispatch (or \texttt{uncertain} hold).\\
+FLAG/HOLD $\rightarrow$ Human Queue $\rightarrow$ TOCTOU Re-Check + Label $\rightarrow$ Updates Memory, Baseline, \& PoSP Arbitration.\\
+All Events $\rightarrow$ SHA-256 Hash Chain $\rightarrow$ RFC 6962 Merkle Batch $\rightarrow$ WORM GCS / Base EVM.
+}}
+\caption{Closed-loop architecture of fAIrewall. Deterministic rules, taint, and canaries form an unbypassable floor; PoSP sampling, taint-gated baselines, and asymmetric human memory optimize cost and utility.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Tier-0 Deterministic Floor and Risk-Routed Escalation}
+Every call first passes through pure, zero-dependency Tier-0 rules in under 0.1 ms: kill-switch enforcement (active even in shadow mode), schema and argument allowlisting with camelCase/separator canonicalization, RBAC, recursive financial parsing (handling strings, nested structures, and minor units such as cents/paise), sliding 60-second velocity windows, egress domain allowlisting with Luhn-validated card and Verhoeff-validated Aadhaar/PAN/credential DLP, payload scanning, and session taint. Inspection (\texttt{inspect}) is strictly pure and never mutates budgets or rate windows; commitment (\texttt{commit}) runs only for permitted calls.
+
+A structural router (\texttt{escalation.py}) decides whether Tier-1 detectors run based strictly on non-spoofable signals: high-risk tool declaration, tainted session, untrusted inbound provenance, or ambiguous Tier-0 \text{FLAG}. Prompt keywords are never routing inputs. Clean, low-risk calls never leave the local process. On high-risk routes, detector crashes or remote timeouts fail closed (\text{BLOCK}).
+
+\subsection{PoSP Content-Source Sampling}
+Running a remote deep detector (such as Google Model Armor) on every external document is costly and slow. We adapt the Proof-of-Sampling (PoSP) equilibrium condition \cite{zhang2024posp} to content sources:
+\begin{equation}
+    p(S) = \max\left(p_{\text{floor}}, \min\left(1, \frac{C}{(1 - r)S + (1 - 2r)R}\right)\right)
+    \label{eq:posp}
+\end{equation}
+where $S$ is the source's earned stake (cumulative clean deep checks, capped at $S_{\max}$), $C$ is the normalized check cost, $R$ is the reward of an unchecked acceptance, $r$ is the assumed dishonest-validator share (default $r=0.10$), and $p_{\text{floor}}=0.02$.
+
+A source enters in \texttt{probation} with $S=0$, forcing $p=1.0$ until it passes $N_{\text{prob}}=20$ consecutive clean deep checks. Once \texttt{trusted}, each arriving item receives a fresh UUID \texttt{request\_id} and is sampled if $\text{HMAC-SHA256}(K, \text{source} \parallel \text{request\_id}) < p(S) \cdot 2^{256}$. Because sampling is decided post-arrival with a secret key $K$, a source cannot predict which items will be audited. A deep-check hit moves the source to \texttt{suspect} ($p=1.0$) pending human arbitration through the threat memory. If a reviewer confirms an injection, the source is slashed ($S \leftarrow 0$) and enters \texttt{quarantined} status, where every item is flagged and the probation requirement scales as $N_{\text{prob}} \cdot (1 + \text{slashes})$.
+
+Crucially, PoSP controls \textit{only} the expensive deep detector. Tier-0 rules, the local TF-IDF detector, threat memory, and session taint run on 100\% of items. Thus, a one-shot attacker with no stake is caught at $p=1.0$ during probation, and even a trusted source that betrays later still taints the session.
+
+\subsection{Taint-Gated Action Baselines, Scope, and Canaries}
+When an agent reads external data and subsequently needs to perform a routine action (e.g., refunding \$40 on the ticket's order or emailing a receipt to \texttt{company.com}), blunt \texttt{forbid\_when\_tainted} blocks the workflow. fAIrewall addresses this with three detector-agnostic layers:
+
+\begin{enumerate}
+    \item \textbf{Action Baselines:} Per principal $\pi$, \texttt{ActionBaseline} records observed tools, normalized destinations (URL/email domains plus destination-named arguments such as \texttt{payee}, \texttt{account}, \texttt{iban}, \texttt{upi}, \texttt{webhook}), and maximum amount per tool. In a tainted session, any never-used tool, unseen destination, or amount exceeding $\alpha \cdot \text{max\_amount}$ ($\alpha=2.0$) is held for human approval (\texttt{baseline.novel\_action}). Per Invariant 3, only clean-session commits and human approvals update the profile.
+    \item \textbf{Monotonic Per-Run Scope:} Before the agent starts, the trusted backend binds a capability envelope (allowed tools, destinations, top-level argument values such as \texttt{order\_id}, and spend cap) to the session. Out-of-scope calls are held or blocked; scope spend violations always block. Per Invariant 2, the agent key may only narrow scope.
+    \item \textbf{Cross-Coupled Canaries:} Operators plant plausible decoy values (\texttt{api\_key}, \texttt{email}, \texttt{url}, \texttt{account}) in system prompts or records. Outbound arguments are scanned across lowercase, alphanumeric-stripped, base64, base64url, and hex normalizations. Any match triggers a critical block, engages a session kill switch, and invokes \texttt{sampler.mark\_suspect()} on every taint source read during that session, closing the loop between exfiltration detection and source trust.
+\end{enumerate}
+
+\subsection{Asymmetric HITL Adaptive Threat Memory}
+Escalated events carrying any learnable signal (or weak detector score $\ge 0.30$) are featurized into unit-length sparse vectors over NFKC-normalized, leetspeak-folded character 4-grams, word unigrams/bigrams, and structural tokens (\texttt{kind}, \texttt{tool}, \texttt{arg}, \texttt{rule}). Events with maximum cosine similarity $< 0.60$ to all judged cases are flagged \texttt{adaptive.novel\_threat} and open a pending review case.
+
+When an authenticated reviewer (distinct from the proposing principal) labels a case \texttt{malicious} or \texttt{benign}, the memory updates both an inverted-index nearest-neighbor store and a deterministic, class-weighted, L2-regularized logistic regression model retrained over all active labels in sorted ID order. Under Invariant 4, one malicious label immediately blocks future variants ($\ge 0.80$ similarity) even if no rule or detector fires, while lifting a soft content flag requires $\ge 2$ unexpired benign approvals at $\ge 0.92$ similarity with no malicious neighbor within $0.60$, and can never lift deterministic blocks or apply to high-risk tools. Revoking a label triggers deterministic retraining without that case.
+
+\subsection{Durable Action Release Authority and Merkle Anchoring}
+For high-stakes workflows, \texttt{ActionStore} places a transactional SQLite or PostgreSQL database in the release path. Every registered tool is pinned by the SHA-256 hash of $(\text{server}, \text{canonical\_definition}, \text{revision})$. First use or any definition change unpins the tool and invalidates prior pending approvals, mitigating MCP tool-poisoning rug-pulls. Submissions require a stable idempotency key; approvals re-evaluate current policy and session state at release time (preventing TOCTOU budget races); and mid-flight handler exceptions transition the action to \texttt{uncertain}, holding subsequent dispatches in that session until an operator reconciles the downstream receipt.
+
+Every decision, freeze, label, and release event is appended to a per-instance SHA-256 hash chain. Periodically, \texttt{Anchorer} verifies chain integrity, seals new records across instances into an RFC 6962 Merkle tree \cite{laurie2013rfc6962} with domain-separated leaf (\texttt{0x00}) and interior (\texttt{0x01}) hashes, chains batch commitments, and publishes the 32-byte commitment to a retention-locked cloud bucket and optionally to Base EVM calldata, enabling offline inclusion verification.
+
+\section{Experimental Evaluation}
+
+All experiments were executed directly against the fAIrewall Python implementation (Python 3.12.9, zero external core dependencies, local SQLite for persistent stores) using fixed seeds via our reproducible harnesses (\texttt{benchmark\_suite.py}, \texttt{tools/eval\_adversary.py}, and \texttt{tools/paper\_eval.py}).
+
+\subsection{Per-Subsystem Latency Microbenchmarks}
+Table~\ref{tab:latency} reports p50, p95, and p99 latency over 1,000 iterations per subsystem. Tier-0 inspection and commit complete in 0.045 ms (p50) and 0.079 ms (p99), adding negligible overhead compared to LLM inference latencies of 300 ms to 3,000 ms. Escalating to the pure-Python \texttt{LearnedDetector} adds only 0.023 ms at p50. SQLite-backed \texttt{ActionBaseline}, 4-decoy \texttt{CanaryRegistry}, and 100-case \texttt{ThreatMemory} each run in under 0.05 ms at p99. Full durable \texttt{ActionStore.submit} (including SQLite transaction, Draft 2020-12 JSON-Schema validation, pin verification, and commit) completes in 0.355 ms (p50) and 0.572 ms (p99). Sealing 1,000 audit records into an RFC 6962 Merkle batch takes 5.743 ms, generating a 10-hash inclusion proof takes 2.212 ms, and offline verification completes in 0.194 ms.
+
+\begin{table}[t]
+\centering
+\caption{Per-Subsystem Latency Microbenchmarks ($N=1,000$)}
+\label{tab:latency}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Subsystem / Operation} & \textbf{p50 (ms)} & \textbf{p95 (ms)} & \textbf{p99 (ms)} \\
+\midrule
+Tier-0 Rules (\texttt{inspect} + \texttt{commit}) & 0.045 & 0.052 & 0.079 \\
+Tier-1 \texttt{LearnedDetector} (escalated) & 0.068 & 0.075 & 0.089 \\
+\texttt{ActionBaseline.assess} (SQLite) & 0.008 & 0.008 & 0.009 \\
+\texttt{CanaryRegistry.scan} (4 decoys) & 0.004 & 0.004 & 0.004 \\
+\texttt{ThreatMemory.assess} (100 cases) & 0.037 & 0.041 & 0.043 \\
+\texttt{ActionStore.submit} (durable SQLite) & 0.355 & 0.403 & 0.572 \\
+\midrule
+\texttt{Anchorer.seal} (1,000 records) & \multicolumn{3}{r}{5.743 ms (batch total)} \\
+\texttt{Anchorer.proof} (10-hash path) & \multicolumn{3}{r}{2.212 ms} \\
+\texttt{check\_proof} (offline verify) & \multicolumn{3}{r}{0.194 ms} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why Text Detectors Alone Fail on Agentic Attacks}
+To verify our motivating premise, we ran \texttt{tools/eval\_adversary.py} across 10 random seeds (30,000 total calls) with randomized obfuscations (base64, homoglyphs, leetspeak, ROT13, zero-width characters, multilingual translations, and no-text structural attacks). Table~\ref{tab:adversary} shows that while Tier-0 rules with taint reduce attacks on untrusted channels to 9.9\% ($\pm 2.5\%$), adding \texttt{LearnedDetector} lowers untrusted-channel bypass only modestly to 8.1\% ($\pm 2.2\%$) and leaves user-channel (40.6\%) and no-text structural attacks (45.0\%) unchanged, with 0.0\% benign hurt and 0.08 ms p99 latency. On public agent-attack benchmarks (LLMail-Inject \cite{abdelnabi2025llmail}, InjecAgent \cite{zhan2024injecagent}, and BIPIA \cite{yi2023bipia}), \texttt{LearnedDetector} catches at most 10\%, 2\%, and 0\% at 1\% false-alarm rate, confirming that text detection cannot carry agent security alone.
+
+\begin{table}[t]
+\centering
+\caption{Randomized Adversarial Bypass Rates (10 Seeds $\times$ 3,000 Calls)}
+\label{tab:adversary}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Config} & \textbf{All} & \textbf{Untrusted} & \textbf{User} & \textbf{Benign Hurt} \\
+\midrule
+Rules Only & 36.6\% $\pm$ 3.0 & 9.9\% $\pm$ 2.5 & 40.6\% $\pm$ 4.8 & 0.0\% \\
++ Heuristic & 36.5\% $\pm$ 3.0 & 9.8\% $\pm$ 2.5 & 40.6\% $\pm$ 4.8 & 0.0\% \\
++ Learned & 36.1\% $\pm$ 3.0 & 8.1\% $\pm$ 2.2 & 40.6\% $\pm$ 4.8 & 0.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Cost-Utility-Security Frontier: Recovering Utility from Taint}
+We evaluated 200 benign and 200 adaptive adversarial multi-step sessions in a support-and-refund workflow. In every episode, the agent first reads untrusted external content and then proposes a write/send tool call. Benign episodes issue routine refunds (\$20 to \$75 on the user's scoped order) or send receipts to \texttt{billing@company.com}. Adversarial episodes embed lexically benign indirect injections (zero classic override phrases) across five equal classes (40 each): (1) novel tool (\texttt{wire\_transfer}), (2) novel external destination (\texttt{external-drop.net}), (3) amount spike (\$240 vs. \$80 baseline max, still under the \$500 policy ceiling), (4) cross-order hijack (valid tool and \$50 amount, but wrong \texttt{order\_id}), and (5) canary exfiltration to an allowed domain (\texttt{company.com}) using raw, base64, and spaced encodings.
+
+\begin{table}[t]
+\centering
+\caption{Utility vs. Security Under Lexically Benign Adaptive Attacks ($N=200$ Benign, $N=200$ Attacks)}
+\label{tab:frontier}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Defense Configuration} & \textbf{Benign} & \textbf{ASR} & \textbf{Attack} & \textbf{Attack} \\
+ & \textbf{Auto (\%)} & \textbf{(\%)} & \textbf{Held (\%)} & \textbf{Blocked (\%)} \\
+\midrule
+No Defense & 100.0 & 100.0 & 0.0 & 0.0 \\
+Text Detector Only & 100.0 & 100.0 & 0.0 & 0.0 \\
+Blunt Session Taint & 0.0 & 0.0 & 0.0 & 100.0 \\
+Taint-Gated Baseline & 100.0 & 40.0 & 60.0 & 0.0 \\
+Monotonic Run Scope & 100.0 & 20.0 & 40.0 & 40.0 \\
+\textbf{Full fAIrewall} & \textbf{100.0} & \textbf{0.0} & \textbf{40.0} & \textbf{60.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:frontier} highlights the core trade-off. Text detection alone fails completely (100.0\% ASR) because the attacks look like ordinary business requests. Blunt session taint eliminates attacks (0.0\% ASR) but destroys automation (0.0\% benign auto-completion). Adding the clean-session \texttt{ActionBaseline} recovers 100.0\% benign automation while holding 60.0\% of attacks (all novel tools, destinations, and amount spikes), missing only cross-order hijacks and same-domain canary leaks. \texttt{ScopeRule} cuts ASR further to 20.0\% by catching cross-order hijacks, leaving only same-domain canary exfiltration. Combining all layers in Full fAIrewall achieves \textbf{100.0\% benign auto-completion and 0.0\% ASR} (60.0\% blocked outright, 40.0\% held for human approval).
+
+In addition, on the 45-attack curated corpus in \texttt{benchmark\_suite.py} (covering indirect injection, single and salami-slicing financial attacks, parameter smuggling, credential/PII exfiltration, and burst loop storms), fAIrewall blocked 44/45 attacks (10/10 financial, 10/10 smuggling, 10/10 exfiltration, 5/5 loop storms, 9/10 indirect injections) with 0/50 benign false positives, compared to 39/45 attacks succeeding against a prompt-filter-only baseline.
+
+\subsection{PoSP Content-Source Sampling: Cost vs. Detection}
+We evaluated \texttt{SourceSampler} over 20 independent random seeds across four source behaviors (Table~\ref{tab:posp}). On a persistent benign source, PoSP reduces deep-check volume by \textbf{92.3\%} over 500 items (38.5 checks) and \textbf{96.4\%} over 2,000 items (72.3 checks, converging to $p_{\text{floor}} = 0.02$). Against a fresh one-shot attacker, probation enforces $p=1.0$, yielding 100.0\% deep-check coverage on the first attack. Against a delayed-betrayal source that behaves honestly for 100 items (23.8 pre-betrayal checks) before injecting continuously, PoSP detects the betrayal in a median of 14.0 items (mean 22.1, max 72), slashes stake to zero, and quarantines the source at $p=1.0$. Finally, when a trusted source ($p < 0.10$) delivers a detector-evading injection that trips an outbound canary, cross-layer feedback immediately demotes the source to \texttt{suspect} ($p=1.0$) in 100.0\% of trials.
+
+\begin{table}[t]
+\centering
+\caption{PoSP Content-Source Sampling Performance (20 Seeds)}
+\label{tab:posp}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Measured Result} \\
+\midrule
+Benign source (500 items): mean deep checks & 38.5 (92.3\% cost reduction) \\
+Benign source (2,000 items): mean deep checks & 72.3 (96.4\% cost reduction) \\
+Benign source final $p$ (at 500 / 2,000 items) & 0.0284 / 0.0200 \\
+One-shot attacker (probation detection rate) & 100.0\% \\
+Delayed betrayal (after 100 clean): median / mean delay & 14.0 / 22.1 items \\
+Canary-triggered demotion ($p < 0.10 \to p = 1.0$) & 100.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Asymmetric HITL Threat Memory and Poisoning Resistance}
+We tested \texttt{ThreatMemory} on repeat false-positive reduction, obfuscated variant generalization, and six adversarial poisoning tests:
+\begin{itemize}
+    \item \textbf{Repeat-Alert Reduction:} Over 50 repeated benign false-positive alerts, human escalations dropped from 50 to 2 (a \textbf{96.0\% reduction}) once \texttt{min\_allow\_votes=2} approvals were recorded.
+    \item \textbf{Obfuscated Variant Blocking:} After a single human \texttt{malicious} label on a novel attack, \texttt{ThreatMemory} automatically blocked \textbf{40/50 (80.0\%)} obfuscated variants (whitespace/case shifts, zero-width Unicode, typos, suffix padding, and leetspeak) with zero rule or detector signals. The 10 unblocked variants were heavy multi-character leetspeak mutations whose 4-gram cosine similarity fell just below the 0.80 block threshold.
+    \item \textbf{Safety Invariants (6/6 Passed):} (1) a single benign approval failed to lift a flag; (2) benign approvals near a confirmed malicious case were vetoed; (3) learned allows never lifted a deterministic financial \text{BLOCK}; (4) learned allows never applied to \texttt{high\_risk=True} tools; (5) an agent principal attempting to self-label its own case raised \texttt{LearningError}; and (6) revoking a label immediately removed its learned block upon deterministic retraining.
+\end{itemize}
+
+\subsection{Durable Dispatch, TOCTOU, Pinning, and Reconciliation}
+Finally, we verified four execution-layer properties in \texttt{ActionStore}: (1) 50 retried submissions sharing one idempotency key executed the downstream handler exactly once; (2) when two \$70 refunds were queued under a \$100 session budget, approving both executed the first and deterministically blocked the second at release re-check (closing the TOCTOU window); (3) a mid-flight handler exception transitioned the action to \texttt{uncertain} and blocked subsequent session dispatches until explicit operator reconciliation; and (4) mutating a tool's description post-registration automatically unpinned the tool and rejected prior pending approvals.
+
+\section{Limitations and Discussion}
+
+We emphasize four honest limitations of fAIrewall's design. First, coarse session-level taint cannot distinguish whether a specific argument was causally derived from untrusted data or from the user prompt; taint-gated baselines and per-run scope recover utility for routine workflows, but open-ended exploratory agents with unpredictable destinations will incur higher human-review rates than fine-grained planner-level IFC \cite{debenedetti2025camel, costa2025fides}. Second, PoSP sampling relies on repeated interaction with reputation-bearing sources; while probation protects against fresh one-shot attackers, a compromised long-trusted source can deliver a median of 14 items before a sampled deep check catches it, which is why deterministic rules, taint, scope, and canaries remain active on every call. Third, n-gram exemplar memory recognizes lexical and obfuscated variants (80\% in our test) rather than wholly novel semantic paraphrases; deep detectors remain necessary for zero-day phrasing. Fourth, our evaluation exercises synthetic and structured multi-step workflows rather than live frontier-model rollouts on full AgentDojo suites; extending the harness to end-to-end live LLM evaluations across AgentDojo and MCPTox is our immediate next step.
+
+\section{Conclusion}
+
+Securing autonomous tool-using agents cannot rely on probabilistic prompt detectors, nor can production deployments absorb the utility loss of blunt taint tracking or the cost of running deep detectors on every external document. fAIrewall demonstrates that coupling a sub-millisecond deterministic reference monitor with Proof-of-Sampling content-source scheduling, taint-gated clean-session action baselines, monotonic per-run scopes, cross-coupled canaries, asymmetric human-in-the-loop threat memory, and a durable pinned release authority closes the cost, utility, and security loop without rewriting the underlying LLM planner.
+
+\begin{thebibliography}{20}
+
+\bibitem{owasp2026agentic}
+OWASP GenAI Security Project, ``OWASP Top 10 for Agentic Applications for 2026,'' Dec. 2025. [Online]. Available: \url{https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/}
+
+\bibitem{yi2023bipia}
+J. Yi, Y. Xie, B. Zhu, E. Kiciman, G. Sun, X. Xie, and F. Wu, ``Benchmarking and defending against indirect prompt injection attacks on large language models,'' \emph{arXiv preprint arXiv:2312.14197}, 2023.
+
+\bibitem{zhan2024injecagent}
+Q. Zhan, Z. Liang, Z. Ying, and D. Kang, ``InjecAgent: Benchmarking indirect prompt injections in tool-integrated large language model agents,'' in \emph{Findings of ACL}, 2024, arXiv:2403.02691.
+
+\bibitem{debenedetti2024agentdojo}
+E. Debenedetti, J. Zhang, M. Balunovi{\'c}, L. Beurer-Kellner, M. Fischer, and F. Tram{\`e}r, ``AgentDojo: A dynamic environment to evaluate prompt injection attacks and defenses for LLM agents,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024, arXiv:2406.13352.
+
+\bibitem{zhan2025adaptive}
+Q. Zhan, R. Fang, H. S. Panchal, and D. Kang, ``Adaptive attacks break defenses against indirect prompt injection attacks on LLM agents,'' \emph{arXiv preprint arXiv:2503.00061}, 2025.
+
+\bibitem{abdelnabi2025llmail}
+S. Abdelnabi, A. Fay, A. Salem, E. Zverev, K.-C. Liao, C.-H. Liu, \emph{et al.}, ``LLMail-Inject: A dataset from a realistic adaptive prompt injection challenge,'' \emph{arXiv preprint arXiv:2506.09956}, 2025.
+
+\bibitem{debenedetti2025camel}
+E. Debenedetti, I. Shumailov, T. Fan, J. Hayes, N. Carlini, D. Fabian, C. Kern, C. Shi, A. Terzis, and F. Tram{\`e}r, ``Defeating prompt injections by design,'' \emph{arXiv preprint arXiv:2503.18813}, 2025.
+
+\bibitem{costa2025fides}
+M. Costa, B. K{\"o}pf, A. Kolluri, A. Paverd, M. Russinovich, A. Salem, S. Tople, L. Wutschitz, and S. Zanella-B{\'e}guelin, ``Securing AI agents with information-flow control,'' \emph{arXiv preprint arXiv:2505.23643}, 2025.
+
+\bibitem{shi2025progent}
+T. Shi, J. He, Z. Wang, H. Li, L. Wu, W. Guo, and D. Song, ``Progent: Programmable privilege control for LLM agents,'' \emph{arXiv preprint arXiv:2504.11703}, 2025.
+
+\bibitem{wang2025agentspec}
+H. Wang, C. M. Poskitt, and J. Sun, ``AgentSpec: Customizable runtime enforcement for safe and reliable LLM agents,'' \emph{arXiv preprint arXiv:2503.18666}, 2025.
+
+\bibitem{aljumaily2026untrusted}
+M. S. Aljumaily, N. S. Alseelawi, and R. Alshabandar, ``Treating the model as an untrusted component: Deterministic policy enforcement, human approval and taint tracking against prompt injection in tool-using agents, with validation on open-weights models,'' \emph{arXiv preprint arXiv:2611.11571}, 2026.
+
+\bibitem{schneider2026dscc}
+C. Schneider, K. Faujdar, P. Schoenegger, and B. Bariach, ``Securing multi-tool AI agent chains with dynamic, real-time compositional policies,'' Microsoft AI, \emph{arXiv preprint}, Jul. 2026.
+
+\bibitem{zhang2024posp}
+Y. Zhang, S. Wang, S. Tan, X. Liu, C. C. Moallemi, and R. A. Popa, ``Proof of Sampling: A Nash equilibrium-based verification protocol for decentralized systems,'' \emph{arXiv preprint arXiv:2405.00295}, 2024.
+
+\bibitem{laurie2013rfc6962}
+B. Laurie, A. Langley, and E. Kasper, ``Certificate Transparency,'' IETF RFC 6962, Jun. 2013.
+
+\bibitem{wu2024isolategpt}
+Y. Wu, F. Roesner, T. Kohno, and N. Zhang, ``IsolateGPT: An execution isolation architecture for LLM-based agentic systems,'' in \emph{Proc. NDSS}, 2025, arXiv:2403.04960.
+
+\bibitem{chennabasappa2025llamafirewall}
+S. Chennabasappa, C. Nikolaidis, D. Song, D. Molnar, S. Ding, S. Wan, S. Whitman, L. Deason, \emph{et al.}, ``LlamaFirewall: An open source guardrail system for building secure AI agents,'' \emph{arXiv preprint arXiv:2505.03574}, 2025.
+
+\bibitem{xiang2024guardagent}
+Z. Xiang \emph{et al.}, ``GuardAgent: Safeguard LLM agents by a guard agent via knowledge-enabled reasoning,'' \emph{arXiv preprint arXiv:2406.09187}, 2024.
+
+\bibitem{chen2025shieldagent}
+Z. Chen, M. Kang, and B. Li, ``ShieldAgent: Shielding agents via verifiable safety policy reasoning,'' \emph{arXiv preprint arXiv:2503.22738}, 2025.
+
+\bibitem{wang2026killchain}
+H. K. Wang and Z. Zhang, ``Kill-Chain Canaries: Stage-level tracking of prompt injection across attack surfaces and five production LLMs,'' MIT and Univ. of Chicago, \emph{arXiv preprint}, Mar. 2026.
+
+\bibitem{rassul2026agentshield}
+Y. H. Rassul, ``AgentShield: Deception-based compromise detection for tool-using LLM agents,'' \emph{arXiv preprint}, May 2026.
+
+\bibitem{trajad2026}
+``TrajAD: Trajectory anomaly detection for trustworthy LLM agents,'' \emph{arXiv preprint}, Feb. 2026.
+
+\bibitem{bindschaedler2026flightrecorder}
+L. Bindschaedler, Q. Botha, and C. Siebenbrunner, ``Agent Flight Recorder: Tamper-evident audit trails with on-chain anchoring for long-horizon tool-using agents,'' \emph{arXiv preprint}, Sep. 2026.
+
+\bibitem{ghosh2026tracekit}
+B. Ghosh, ``Tracekit: Tamper-evident intent-reasoning-action auditing for autonomous coding agents,'' \emph{arXiv preprint arXiv:2609.35659}, Sep. 2026.
+
+\end{thebibliography}
+
+\end{document}
